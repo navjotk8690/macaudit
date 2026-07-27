@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MacAudit Dashboard</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main>
+    <header>
+      <div><div class="eyebrow">LOCAL SECURITY CONSOLE</div><h1>MacAudit</h1><p>Remote access, privacy permissions, persistence, and account changes.</p></div>
+      <div class="live"><span></span> Live · refreshes every 10s</div>
+    </header>
+
+    <section class="cards" id="severityCards"></section>
+
+    <section class="grid">
+      <article class="panel status-panel">
+        <div class="panel-title"><h2>Current posture</h2><span id="lastScan">Waiting for data</span></div>
+        <div id="posture" class="posture"></div>
+      </article>
+      <article class="panel">
+        <div class="panel-title"><h2>Remote tools</h2><span>running now</span></div>
+        <div id="tools" class="tools"></div>
+      </article>
+    </section>
+
+    <section class="panel events-panel">
+      <div class="panel-title event-head">
+        <div><h2>Event timeline</h2><span id="eventCount">0 events</span></div>
+        <div class="filters">
+          <select id="severity"><option value="">All severities</option><option>CRITICAL</option><option>HIGH</option><option>MEDIUM</option><option>LOW</option><option>INFO</option></select>
+          <input id="search" placeholder="Search events…">
+        </div>
+      </div>
+      <div id="events" class="events"></div>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

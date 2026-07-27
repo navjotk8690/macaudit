@@ -1,0 +1,206 @@
+#!/bin/bash
+set -u
+PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin
+
+VERSION="2.0.0"
+BASE="/Library/Application Support/MacAudit"
+LOG_DIR="/Library/Logs/MacAudit"
+CONF="$BASE/macaudit.conf"
+STATE="$BASE/state"
+SNAP="$BASE/snapshots"
+EVENTS="$LOG_DIR/events.jsonl"
+RUNLOG="$LOG_DIR/agent.log"
+LOCK="$STATE/run.lock"
+NOTIFY_STATE="$STATE/notifications"
+
+mkdir -p "$STATE" "$SNAP" "$LOG_DIR" "$NOTIFY_STATE"
+chmod 700 "$BASE" "$STATE" "$SNAP" "$NOTIFY_STATE" 2>/dev/null || true
+chmod 750 "$LOG_DIR" 2>/dev/null || true
+
+[ -r "$CONF" ] && . "$CONF"
+: "${RETENTION_DAYS:=90}"
+: "${ENABLE_NOTIFICATIONS:=1}"
+: "${NOTIFY_MIN_SEVERITY:=HIGH}"
+: "${NOTIFICATION_COOLDOWN_SECONDS:=900}"
+: "${ENABLE_UNIFIED_LOG_SCAN:=1}"
+: "${ENABLE_TCC_SCAN:=1}"
+: "${REMOTE_SESSION_REGEX:=session (started|connected|accepted)|remote (user|admin|technician).*connected|technician.*(joined|connected)|silent assist|unattended session|screen sharing started|control session started|webrtc.*connected|peer.*connected}"
+
+now_iso() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+json_escape() { /usr/bin/perl -0777 -pe 's/\\/\\\\/g; s/"/\\"/g; s/\r/\\r/g; s/\n/\\n/g; s/\t/\\t/g'; }
+severity_rank() { case "$1" in INFO) echo 0;; LOW) echo 1;; MEDIUM) echo 2;; HIGH) echo 3;; CRITICAL) echo 4;; *) echo 0;; esac; }
+
+notify_user() {
+  local severity="$1" category="$2" message="$3" fingerprint="$4"
+  [ "$ENABLE_NOTIFICATIONS" = "1" ] || return 0
+  [ "$(severity_rank "$severity")" -ge "$(severity_rank "$NOTIFY_MIN_SEVERITY")" ] || return 0
+
+  local stamp="$NOTIFY_STATE/$fingerprint" now last=0
+  now="$(date +%s)"
+  [ -f "$stamp" ] && last="$(cat "$stamp" 2>/dev/null || echo 0)"
+  if [ $((now-last)) -lt "$NOTIFICATION_COOLDOWN_SECONDS" ] 2>/dev/null; then return 0; fi
+  printf '%s' "$now" > "$stamp"
+
+  local uid user safe_message safe_title
+  uid="$(stat -f '%u' /dev/console 2>/dev/null || echo 0)"
+  user="$(stat -f '%Su' /dev/console 2>/dev/null || echo '')"
+  [ "$uid" -gt 500 ] 2>/dev/null || return 0
+  [ -n "$user" ] || return 0
+  safe_message="$(printf '%s' "$message" | tr '\n\r' '  ' | sed 's/["\\]/ /g' | cut -c1-220)"
+  safe_title="MacAudit $severity - $category"
+  launchctl asuser "$uid" sudo -u "$user" /usr/bin/osascript \
+    -e "display notification \"$safe_message\" with title \"$safe_title\" sound name \"Submarine\"" \
+    >/dev/null 2>&1 || true
+}
+
+emit() {
+  local severity="$1" category="$2" message="$3" evidence="${4:-}" dedup_key="${5:-$category|$message}"
+  local fingerprint lastfile current_hash previous_hash ts host user
+  fingerprint="$(printf '%s' "$dedup_key" | shasum -a 256 | awk '{print $1}')"
+  lastfile="$STATE/event-$fingerprint.hash"
+  current_hash="$(printf '%s\n%s' "$message" "$evidence" | shasum -a 256 | awk '{print $1}')"
+  previous_hash="$(cat "$lastfile" 2>/dev/null || true)"
+  [ "$current_hash" = "$previous_hash" ] && return 0
+  printf '%s' "$current_hash" > "$lastfile"
+
+  ts="$(now_iso)"; host="$(scutil --get ComputerName 2>/dev/null || hostname)"; user="$(stat -f '%Su' /dev/console 2>/dev/null || echo unknown)"
+  printf '{"timestamp":"%s","severity":"%s","category":"%s","host":"%s","console_user":"%s","message":"%s","evidence":"%s"}\n' \
+    "$ts" "$severity" "$category" "$(printf '%s' "$host" | json_escape)" "$(printf '%s' "$user" | json_escape)" \
+    "$(printf '%s' "$message" | json_escape)" "$(printf '%s' "$evidence" | json_escape)" >> "$EVENTS"
+  printf '%s [%s] %s: %s\n' "$ts" "$severity" "$category" "$message" >> "$RUNLOG"
+  notify_user "$severity" "$category" "$message" "$fingerprint"
+}
+
+acquire_lock() {
+  if ! mkdir "$LOCK" 2>/dev/null; then exit 0; fi
+  trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT INT TERM
+}
+
+snapshot_diff() {
+  local name="$1" severity="$2" category="$3" newfile="$4" oldfile
+  oldfile="$SNAP/$name.current"
+  if [ ! -f "$oldfile" ]; then
+    cp "$newfile" "$oldfile"
+    emit INFO "$category" "Baseline created for $name" "$(cat "$newfile")" "baseline:$name"
+    return
+  fi
+  if ! cmp -s "$oldfile" "$newfile"; then
+    local d; d="$(diff -u "$oldfile" "$newfile" 2>/dev/null | tail -n +3 | head -n 160)"
+    emit "$severity" "$category" "$name changed" "$d" "change:$name"
+    cp "$newfile" "$oldfile"
+  fi
+}
+
+remote_processes() {
+  ps -axo pid=,user=,command= | awk '
+    BEGIN{IGNORECASE=1}
+    /\/ARDAgent([ .\/]|$)|\/screensharingd([ .\/]|$)|TeamViewer|AnyDesk|Splashtop|RustDesk|ScreenConnect|ConnectWise|Bomgar|BeyondTrust|LogMeIn|RealVNC|TigerVNC/ {
+      if ($0 !~ /MacAudit|awk/) print
+    }'
+}
+
+remote_pids() {
+  remote_processes | awk '{print $1}' | grep -E '^[0-9]+$' || true
+}
+
+collect_remote_state() {
+  local f active; f="$(mktemp)"
+  {
+    echo "remote_login=$(systemsetup -getremotelogin 2>/dev/null | sed 's/.*: //')"
+    echo "remote_apple_events=$(systemsetup -getremoteappleevents 2>/dev/null | sed 's/.*: //')"
+    if launchctl print system/com.apple.screensharing >/dev/null 2>&1; then echo 'screen_sharing_service=loaded'; else echo 'screen_sharing_service=not_loaded'; fi
+    if pgrep -x ARDAgent >/dev/null 2>&1; then echo 'ard_agent=running'; else echo 'ard_agent=not_running'; fi
+    echo 'remote_processes:'
+    remote_processes
+    echo 'listening_remote_ports:'
+    lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | awk 'NR==1 || $9 ~ /:(22|5900|3283)$/' || true
+  } | sort > "$f"
+  snapshot_diff remote_state HIGH remote-access "$f"
+  active="$(remote_processes)"
+  [ -n "$active" ] && emit INFO remote-access "Remote-support software is running" "$active" "remote-processes"
+  rm -f "$f"
+}
+
+collect_ssh() {
+  local f active; f="$(mktemp)"
+  {
+    echo 'established_ssh:'; lsof -nP -iTCP:22 -sTCP:ESTABLISHED 2>/dev/null || true
+    echo 'authorized_keys:'; find /Users -path '*/.ssh/authorized_keys' -type f -maxdepth 4 -exec shasum -a 256 {} \; 2>/dev/null | sort
+    [ -f /var/root/.ssh/authorized_keys ] && shasum -a 256 /var/root/.ssh/authorized_keys
+    echo 'sshd_config:'; [ -f /etc/ssh/sshd_config ] && shasum -a 256 /etc/ssh/sshd_config
+  } > "$f"
+  snapshot_diff ssh_state HIGH ssh "$f"
+  active="$(lsof -nP -iTCP:22 -sTCP:ESTABLISHED 2>/dev/null | tail -n +2)"
+  [ -n "$active" ] && emit HIGH ssh "Active SSH connection detected" "$active" "active-ssh"
+  rm -f "$f"
+}
+
+collect_accounts() { local f; f="$(mktemp)"; { echo 'local_users:'; dscl . list /Users UniqueID 2>/dev/null | awk '$2 >= 500 {print}' | sort; echo 'admin_group:'; dscl . read /Groups/admin GroupMembership 2>/dev/null; } > "$f"; snapshot_diff accounts CRITICAL identity "$f"; rm -f "$f"; }
+
+collect_persistence() {
+  local f; f="$(mktemp)"
+  {
+    for d in /Library/LaunchDaemons /Library/LaunchAgents /Users/*/Library/LaunchAgents; do [ -d "$d" ] || continue; find "$d" -maxdepth 1 -type f -name '*.plist' -exec shasum -a 256 {} \; 2>/dev/null; done
+    echo 'cron:'; for u in $(dscl . list /Users UniqueID 2>/dev/null | awk '$2 >= 500 {print $1}'); do crontab -u "$u" -l 2>/dev/null | sed "s/^/$u: /"; done
+    echo 'periodic:'; find /etc/periodic -type f -maxdepth 3 -exec shasum -a 256 {} \; 2>/dev/null
+  } | sort > "$f"
+  snapshot_diff persistence HIGH persistence "$f"; rm -f "$f"
+}
+
+collect_security() { local f; f="$(mktemp)"; { echo "sip=$(csrutil status 2>/dev/null)"; echo "gatekeeper=$(spctl --status 2>/dev/null)"; echo "filevault=$(fdesetup status 2>/dev/null)"; echo "firewall_global=$(defaults read /Library/Preferences/com.apple.alf globalstate 2>/dev/null || echo unknown)"; echo "stealth_mode=$(defaults read /Library/Preferences/com.apple.alf stealthenabled 2>/dev/null || echo unknown)"; echo "remote_login=$(systemsetup -getremotelogin 2>/dev/null)"; echo "remote_apple_events=$(systemsetup -getremoteappleevents 2>/dev/null)"; } > "$f"; snapshot_diff security HIGH security-settings "$f"; rm -f "$f"; }
+
+collect_mdm_extensions() { local f; f="$(mktemp)"; { echo 'mdm:'; profiles status -type enrollment 2>/dev/null || true; profiles show -type enrollment 2>/dev/null || true; echo 'system_extensions:'; systemextensionsctl list 2>/dev/null || true; } > "$f"; snapshot_diff mdm_extensions HIGH device-management "$f"; rm -f "$f"; }
+
+collect_apps() { local f; f="$(mktemp)"; { find /Applications /Users/*/Applications -maxdepth 1 -type d -name '*.app' -print 2>/dev/null | sort; echo 'packages:'; pkgutil --pkgs 2>/dev/null | sort; } > "$f"; snapshot_diff installed_software MEDIUM software "$f"; rm -f "$f"; }
+
+collect_tcc() {
+  [ "$ENABLE_TCC_SCAN" = "1" ] || return
+  local f found=0; f="$(mktemp)"
+  for db in "/Library/Application Support/com.apple.TCC/TCC.db" /Users/*/Library/Application\ Support/com.apple.TCC/TCC.db; do
+    [ -f "$db" ] || continue
+    if sqlite3 "$db" 'select service,client,auth_value,auth_reason,last_modified from access order by service,client;' >> "$f" 2>/dev/null; then found=1; else echo "UNREADABLE:$db" >> "$f"; fi
+  done
+  sort -u "$f" -o "$f"; snapshot_diff tcc_permissions HIGH privacy-permissions "$f"
+  [ "$found" -eq 0 ] && emit LOW privacy-permissions "TCC databases could not be read; Full Disk Access may be required" "See README" "tcc-unreadable"
+  rm -f "$f"
+}
+
+
+collect_unified_logs() {
+  [ "$ENABLE_UNIFIED_LOG_SCAN" = "1" ] || return
+  local out strong
+  out="$(log show --last 2m --style compact --predicate '(process == "sshd") OR (process CONTAINS[c] "screensharing") OR (process CONTAINS[c] "ARDAgent") OR (process CONTAINS[c] "TeamViewer") OR (process CONTAINS[c] "jumpcloud-assist")' 2>/dev/null | tail -n 250 || true)"
+  strong="$(printf '%s\n' "$out" | grep -Ei "$REMOTE_SESSION_REGEX|Accepted (password|publickey)|session opened for user" | grep -Evi 'screenRecordingCheck|prerequisite check|networkd_settings_read_from_file' || true)"
+  [ -n "$strong" ] && emit CRITICAL remote-session "Unified log contains a strong remote-session indicator" "$strong" "unified-remote-session"
+}
+
+is_external_socket_line() {
+  grep -E ' (TCP|UDP) ' | grep -Ev '127\.0\.0\.1|\[::1\]| localhost:|->127\.0\.0\.1|->\[::1\]' || true
+}
+
+collect_network_remote() {
+  local f pid sockets; f="$(mktemp)"
+  for pid in $(remote_pids); do
+    sockets="$(lsof -nP -a -p "$pid" -i 2>/dev/null | tail -n +2 | is_external_socket_line)"
+    [ -n "$sockets" ] || continue
+    ps -p "$pid" -o pid=,user=,command= >> "$f"
+    printf '%s\n' "$sockets" >> "$f"
+  done
+  if [ -s "$f" ]; then emit MEDIUM network "Remote-support software has non-local network sockets" "$(cat "$f")" "remote-external-sockets"; fi
+  rm -f "$f"
+}
+
+rotate() { find "$LOG_DIR" -type f -mtime "+$RETENTION_DAYS" -delete 2>/dev/null || true; }
+run_all() { acquire_lock; collect_remote_state; collect_ssh; collect_accounts; collect_persistence; collect_security; collect_mdm_extensions; collect_apps; collect_tcc; collect_unified_logs; collect_network_remote; rotate; }
+
+test_notification() { emit HIGH test "MacAudit notification test succeeded" "This is a local test event." "notification-test-$(date +%s)"; echo "Test event written. Check Notification Center and $EVENTS"; }
+
+case "${1:-run}" in
+  run) run_all ;;
+  status) echo "MacAudit $VERSION"; echo "MacAudit base: $BASE"; echo "Events: $EVENTS"; launchctl print system/io.github.macaudit 2>/dev/null | head -n 30 || true ;;
+  report) days="${2:-1}"; echo "MacAudit events from the last $days day(s)"; since="$(date -v-"${days}"d '+%Y-%m-%d' 2>/dev/null || date '+%Y-%m-%d')"; awk -v s="$since" 'substr($0,15,10) >= s {print}' "$EVENTS" 2>/dev/null || true ;;
+  baseline) rm -f "$SNAP"/*.current; run_all ;;
+  notify-test) test_notification ;;
+  dashboard) url="http://127.0.0.1:8765"; uid="$(stat -f '%u' /dev/console 2>/dev/null || echo 0)"; user="$(stat -f '%Su' /dev/console 2>/dev/null || echo '')"; echo "MacAudit dashboard: $url"; [ "$uid" -gt 500 ] 2>/dev/null && launchctl asuser "$uid" sudo -u "$user" open "$url" >/dev/null 2>&1 || true ;;
+  *) echo "Usage: macaudit {run|status|report [days]|baseline|notify-test|dashboard}"; exit 2 ;;
+esac
