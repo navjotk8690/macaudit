@@ -1,8 +1,7 @@
 #!/bin/bash
 set -euo pipefail
-if [ "$(id -u)" -ne 0 ]; then echo "Run with sudo"; exit 1; fi
-for label in io.github.macaudit.dashboard io.github.macaudit; do launchctl bootout "system/$label" >/dev/null 2>&1 || true; done
-rm -f /Library/LaunchDaemons/io.github.macaudit.plist /Library/LaunchDaemons/io.github.macaudit.dashboard.plist
-rm -f /usr/local/libexec/macaudit
+[ "$(id -u)" -eq 0 ] || { echo 'Run with sudo.'; exit 1; }
+for label in com.local.macaudit.dashboard com.local.macaudit; do launchctl bootout "system/$label" >/dev/null 2>&1 || true; done
+rm -f /Library/LaunchDaemons/com.local.macaudit.plist /Library/LaunchDaemons/com.local.macaudit.dashboard.plist /usr/local/libexec/macaudit
 rm -rf /usr/local/libexec/macaudit-dashboard
-echo "MacAudit removed. Historical logs and configuration were retained."
+echo 'MacAudit was removed. Logs, configuration, token, and historical state were retained in /Library.'
