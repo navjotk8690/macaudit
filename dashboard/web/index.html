@@ -9,32 +9,60 @@
 <body>
   <main>
     <header>
-      <div><div class="eyebrow">LOCAL SECURITY CONSOLE</div><h1>MacAudit</h1><p>Remote access, privacy permissions, persistence, and account changes.</p></div>
-      <div class="live"><span></span> Live · refreshes every 10s</div>
+      <div>
+        <div class="eyebrow">LOCAL SECURITY CONSOLE</div>
+        <h1>MacAudit</h1>
+        <p>Remote access, screen permissions, startup items, accounts, software, and Mac security settings.</p>
+      </div>
+      <div id="healthBadge" class="live"><span></span><b>Checking</b> · refreshes every 10s</div>
     </header>
 
-    <section class="cards" id="severityCards"></section>
+    <section class="cards" id="severityCards" aria-label="Filter event timeline by severity"></section>
 
-    <section class="grid">
+    <section class="panel events-panel" id="eventTimeline">
+      <div class="panel-title event-head">
+        <div><h2>Event timeline</h2><span id="eventCount">0 events</span></div>
+        <div class="filters">
+          <select id="datePreset" aria-label="Filter by date">
+            <option value="today" selected>Today</option>
+            <option value="yesterday">Yesterday</option>
+            <option value="7days">Last 7 days</option>
+            <option value="30days">Last 30 days</option>
+            <option value="all">All retained history</option>
+            <option value="custom">Custom range</option>
+          </select>
+          <div id="customDates" class="custom-dates" hidden>
+            <input type="date" id="dateFrom" aria-label="Start date">
+            <span>to</span>
+            <input type="date" id="dateTo" aria-label="End date">
+          </div>
+          <select id="severity" aria-label="Filter by severity"><option value="">All severities</option><option>CRITICAL</option><option>HIGH</option><option>MEDIUM</option><option>LOW</option><option>INFO</option></select>
+          <input id="search" placeholder="Search events…" aria-label="Search events">
+        </div>
+      </div>
+      <div id="activeFilter" class="active-filter" hidden></div>
+      <div id="events" class="events"></div>
+    </section>
+
+    <section class="grid overview-grid">
       <article class="panel status-panel">
-        <div class="panel-title"><h2>Current posture</h2><span id="lastScan">Waiting for data</span></div>
+        <div class="panel-title compact-title">
+          <div><h2>Mac security and remote access</h2><span id="lastScan">Waiting for data</span></div>
+          <span id="collectorVersion"></span>
+        </div>
         <div id="posture" class="posture"></div>
       </article>
-      <article class="panel">
-        <div class="panel-title"><h2>Remote tools</h2><span>running now</span></div>
+      <article class="panel tools-panel">
+        <div class="panel-title compact-title"><div><h2>Remote tools</h2><span>running now</span></div></div>
         <div id="tools" class="tools"></div>
       </article>
     </section>
 
-    <section class="panel events-panel">
-      <div class="panel-title event-head">
-        <div><h2>Event timeline</h2><span id="eventCount">0 events</span></div>
-        <div class="filters">
-          <select id="severity"><option value="">All severities</option><option>CRITICAL</option><option>HIGH</option><option>MEDIUM</option><option>LOW</option><option>INFO</option></select>
-          <input id="search" placeholder="Search events…">
-        </div>
+    <section class="panel monitor-panel">
+      <div class="panel-title compact-title">
+        <div><h2>What MacAudit monitors</h2><span>Enabled checks and scan frequency</span></div>
       </div>
-      <div id="events" class="events"></div>
+      <div id="monitoring" class="monitoring"></div>
     </section>
   </main>
   <script src="/app.js"></script>

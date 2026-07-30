@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.local.macaudit.dashboard</string>
+<key>ProgramArguments</key><array><string>__PYTHON__</string><string>/usr/local/libexec/macaudit-dashboard/server.py</string></array>
+<key>EnvironmentVariables</key><dict><key>MACAUDIT_DASHBOARD_PORT</key><string>8765</string></dict>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ProcessType</key><string>Background</string>
+<key>ThrottleInterval</key><integer>10</integer>
+<key>StandardOutPath</key><string>/Library/Logs/MacAudit/dashboard.out.log</string><key>StandardErrorPath</key><string>/Library/Logs/MacAudit/dashboard.err.log</string>
+</dict></plist>
