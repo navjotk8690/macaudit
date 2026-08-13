@@ -17,7 +17,8 @@ chmod 700 "$BASE" "$BASE/state" "$BASE/snapshots" "$BASE/state/notifications"; c
 for label in com.local.macaudit.dashboard com.local.macaudit; do launchctl bootout "system/$label" >/dev/null 2>&1 || true; done
 
 # Run and verify the initial scan before enabling the scheduled services.
-rm -f "$BASE/health.json"
+# Clear cadence stamps so an upgrade always performs every collector group once.
+rm -f "$BASE/health.json" "$BASE/state"/due-*
 echo 'Running initial MacAudit scan...'
 if ! /usr/local/libexec/macaudit run; then
   echo 'Initial MacAudit scan failed. Review /Library/Logs/MacAudit/agent.log.' >&2
@@ -32,4 +33,4 @@ launchctl bootstrap system /Library/LaunchDaemons/com.local.macaudit.plist
 launchctl bootstrap system /Library/LaunchDaemons/com.local.macaudit.dashboard.plist
 launchctl kickstart -k system/com.local.macaudit.dashboard
 /usr/local/libexec/macaudit status
-echo; echo 'MacAudit 3.2.5 installed.'; echo 'Initial scan completed successfully.'; echo 'Open the private dashboard with:'; echo '  sudo /usr/local/libexec/macaudit dashboard'
+echo; echo 'MacAudit 3.3.3 installed.'; echo 'Initial scan completed successfully.'; echo 'Open the private dashboard with:'; echo '  sudo /usr/local/libexec/macaudit dashboard'

@@ -3,7 +3,7 @@ set -u
 PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin
 umask 077
 
-VERSION="3.2.5"
+VERSION="3.3.3"
 BASE="/Library/Application Support/MacAudit"
 LOG_DIR="/Library/Logs/MacAudit"
 CONF="$BASE/macaudit.conf"
@@ -25,6 +25,25 @@ json_escape(){ /usr/bin/perl -0777 -pe 's/\\/\\\\/g; s/"/\\"/g; s/\r/\\r/g; s/\n
 valid_int(){ [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge "$2" ] && [ "$1" -le "$3" ]; }
 severity_rank(){ case "$1" in INFO) echo 0;; LOW) echo 1;; MEDIUM) echo 2;; HIGH) echo 3;; CRITICAL) echo 4;; *) echo 0;; esac; }
 log(){ printf '%s %s\n' "$(now_iso)" "$*" >> "$LOG_DIR/agent.log"; }
+
+firewall_state(){
+  local out raw
+  if [ -x /usr/libexec/ApplicationFirewall/socketfilterfw ]; then
+    out="$(/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate 2>/dev/null || true)"
+    case "$out" in *enabled*|*"State = 1"*|*"State = 2"*) echo enabled; return;; *disabled*|*"State = 0"*) echo disabled; return;; esac
+  fi
+  raw="$(defaults read /Library/Preferences/com.apple.alf globalstate 2>/dev/null || true)"
+  case "$raw" in 1|2) echo enabled;; 0) echo disabled;; *) echo unknown;; esac
+}
+stealth_state(){
+  local out raw
+  if [ -x /usr/libexec/ApplicationFirewall/socketfilterfw ]; then
+    out="$(/usr/libexec/ApplicationFirewall/socketfilterfw --getstealthmode 2>/dev/null || true)"
+    case "$out" in *enabled*) echo enabled; return;; *disabled*) echo disabled; return;; esac
+  fi
+  raw="$(defaults read /Library/Preferences/com.apple.alf stealthenabled 2>/dev/null || true)"
+  case "$raw" in 1) echo enabled;; 0) echo disabled;; *) echo unknown;; esac
+}
 
 load_config(){
   [ -r "$CONF" ] || return 0
@@ -81,9 +100,23 @@ friendly_fields(){
     device-management) echo 'Device management changed|MDM enrolment or a system extension changed.|Expected on a company-managed Mac or after approved security software changes.|Confirm the organisation and extension are trusted.';;
     software) echo 'Installed software changed|An application or installer package was added or removed.|Expected when installing, updating, or uninstalling software.|Review unfamiliar applications and packages.';;
     remote-session) echo 'Possible remote-control session detected|MacAudit found a strong log message associated with a remote session.|Expected only during an approved remote-support session.|If no session was expected, disconnect from the network and contact your security team.';;
-    remote-access) echo 'Remote-access capability changed|Remote Login, Screen Sharing, Apple Remote Desktop, a listening remote port, or a support process changed.|Expected when sharing features or approved support software are enabled or disabled.|Review System Settings > General > Sharing and any running support tools.';;
+    remote-access) echo 'Remote access setting changed|Remote Login, Screen Sharing, Apple Remote Desktop, or Remote Apple Events changed.|Expected when you or trusted IT intentionally enable or disable a sharing feature.|Review System Settings > General > Sharing and confirm the setting change was expected.';;
     ssh) echo 'SSH configuration changed|Remote Login activity, authorised keys, or SSH configuration changed.|Expected when approved keys or settings are updated.|Review authorised keys and disable Remote Login if unused.';;
     *) echo 'Mac security activity detected|MacAudit noticed a change worth recording.|This may be normal after a deliberate system or software change.|Review the details and confirm the activity was expected.';;
+  esac
+}
+
+baseline_fields(){
+  case "$1" in
+    privacy-permissions) echo 'Privacy permissions baseline created|MacAudit recorded the current privacy permissions as the starting point for future comparisons.|Expected on first install, after an upgrade that rebuilds this collector, or after a manual baseline reset.|No action is required. Future scans will report permission changes relative to this baseline.';;
+    software) echo 'Installed software baseline created|MacAudit recorded the currently installed applications and installer packages as the starting point for future comparisons.|Expected on first install, after an upgrade that rebuilds this collector, or after a manual baseline reset.|No action is required. Future scans will report software added or removed relative to this baseline.';;
+    persistence) echo 'Startup items baseline created|MacAudit recorded the current LaunchAgents, LaunchDaemons and scheduled startup items as the starting point for future comparisons.|Expected on first install, after an upgrade that rebuilds this collector, or after a manual baseline reset.|No action is required. Future scans will report startup items added, removed or modified relative to this baseline.';;
+    security-settings) echo 'Mac security baseline created|MacAudit recorded the current SIP, Gatekeeper, FileVault and firewall settings as the starting point for future comparisons.|Expected on first install, after an upgrade that rebuilds this collector, or after a manual baseline reset.|No action is required. Future scans will report security setting changes relative to this baseline.';;
+    identity) echo 'User and administrator baseline created|MacAudit recorded the current local users and administrators as the starting point for future comparisons.|Expected on first install, after an upgrade that rebuilds this collector, or after a manual baseline reset.|No action is required. Future scans will report account and administrator changes relative to this baseline.';;
+    remote-access) echo 'Remote access settings baseline created|MacAudit recorded Remote Login, Screen Sharing, Apple Remote Desktop and Remote Apple Events as the starting point for future comparisons.|Expected on first install, after an upgrade that rebuilds this collector, or after a manual baseline reset.|No action is required. Future scans will report remote-access setting changes relative to this baseline.';;
+    ssh) echo 'SSH configuration baseline created|MacAudit recorded authorised keys and SSH server configuration as the starting point for future comparisons.|Expected on first install, after an upgrade that rebuilds this collector, or after a manual baseline reset.|No action is required. Future scans will report SSH configuration changes relative to this baseline.';;
+    device-management) echo 'Device management baseline created|MacAudit recorded the current MDM enrolment and system extensions as the starting point for future comparisons.|Expected on first install, after an upgrade that rebuilds this collector, or after a manual baseline reset.|No action is required. Future scans will report device-management changes relative to this baseline.';;
+    *) echo 'Initial baseline created|MacAudit recorded the current state as the starting point for future comparisons.|Expected on first install, after a collector upgrade, or after a manual baseline reset.|No action is required.';;
   esac
 }
 
@@ -94,43 +127,238 @@ emit(){
   hash="$(printf '%s\n%s\n%s' "$message" "$evidence" "$state" | shasum -a 256 | awk '{print $1}')"; old="$(cat "$oldfile" 2>/dev/null || true)"
   [ "$hash" = "$old" ] && return 0; printf '%s' "$hash" > "$oldfile"
   ts="$(now_iso)"; host="$(scutil --get ComputerName 2>/dev/null || hostname)"; user="$(stat -f '%Su' /dev/console 2>/dev/null || echo unknown)"
-  fields="$(friendly_fields "$category")"; IFS='|' read -r title why normal action <<< "$fields"
+  if [ "$state" = baseline ]; then fields="$(baseline_fields "$category")"; else fields="$(friendly_fields "$category")"; fi
+  IFS='|' read -r title why normal action <<< "$fields"
   evidence="$(printf '%s' "$evidence" | head -c 12000)"
   printf '{"timestamp":"%s","severity":"%s","category":"%s","state":"%s","host":"%s","console_user":"%s","message":"%s","evidence":"%s"}\n' "$ts" "$severity" "$category" "$state" "$(printf '%s' "$host"|json_escape)" "$(printf '%s' "$user"|json_escape)" "$(printf '%s' "$message"|json_escape)" "$(printf '%s' "$evidence"|json_escape)" >> "$EVENTS"
   printf '{"timestamp":"%s","severity":"%s","category":"%s","state":"%s","title":"%s","summary":"%s","normal_when":"%s","recommended_action":"%s","message":"%s","evidence":"%s"}\n' "$ts" "$severity" "$category" "$state" "$(printf '%s' "$title"|json_escape)" "$(printf '%s' "$why"|json_escape)" "$(printf '%s' "$normal"|json_escape)" "$(printf '%s' "$action"|json_escape)" "$(printf '%s' "$message"|json_escape)" "$(printf '%s' "$evidence"|json_escape)" >> "$DASH_EVENTS"
-  log "[$severity] $category: $message"; notify_user "$severity" "$category" "$title" "$fp"
+  log "[$severity] $category: $message"; notify_user "$severity" "$category" "$message" "$fp"
 }
 
 set_active_state(){
-  local key="$1" active="$2" severity="$3" category="$4" onmsg="$5" offmsg="$6" evidence="${7:-}" file="$STATE/active-$key" previous=0
-  [ -f "$file" ] && previous="$(cat "$file" 2>/dev/null || echo 0)"
-  if [ "$active" = 1 ] && [ "$previous" != 1 ]; then emit "$severity" "$category" "$onmsg" "$evidence" "state:$key" active; fi
+  local key active severity category onmsg offmsg evidence initial_onmsg file previous=0 existed=0 message
+  key="$1"
+  active="$2"
+  severity="$3"
+  category="$4"
+  onmsg="$5"
+  offmsg="$6"
+  evidence="${7:-}"
+  initial_onmsg="${8:-}"
+  file="$STATE/active-$key"
+  if [ -f "$file" ]; then existed=1; previous="$(cat "$file" 2>/dev/null || echo 0)"; fi
+  if [ "$active" = 1 ] && [ "$previous" != 1 ]; then
+    message="$onmsg"
+    [ "$existed" = 0 ] && [ -n "$initial_onmsg" ] && message="$initial_onmsg"
+    emit "$severity" "$category" "$message" "$evidence" "state:$key" active
+  fi
   if [ "$active" = 0 ] && [ "$previous" = 1 ]; then emit INFO "$category" "$offmsg" "" "state:$key" cleared; fi
   printf '%s' "$active" > "$file"
 }
 
+smart_diff_message(){
+  local name="$1" oldfile="$2" newfile="$3" python_bin=""
+  for python_bin in /usr/bin/python3 /opt/homebrew/bin/python3 /usr/local/bin/python3; do [ -x "$python_bin" ] && break; done
+  [ -x "$python_bin" ] || { printf '%s changed' "${name//_/ }"; return; }
+  "$python_bin" - "$name" "$oldfile" "$newfile" <<'PYSMART'
+import sys
+from pathlib import Path
+name, old_path, new_path = sys.argv[1:]
+old = Path(old_path).read_text(errors='replace').splitlines()
+new = Path(new_path).read_text(errors='replace').splitlines()
+oldset, newset = set(old), set(new)
+added, removed = sorted(newset-oldset), sorted(oldset-newset)
+
+def plural(n, one, many=None): return one if n == 1 else (many or one+'s')
+
+def hash_map(lines):
+    out={}
+    for line in lines:
+        parts=line.split(None,1)
+        if len(parts)==2 and len(parts[0])==64:
+            out[parts[1]]=parts[0]
+    return out
+
+if name == 'installed_software':
+    apps_add=[x for x in added if x.endswith('.app')]
+    apps_del=[x for x in removed if x.endswith('.app')]
+    pkg_add=[x for x in added if not x.endswith('.app')]
+    pkg_del=[x for x in removed if not x.endswith('.app')]
+    bits=[]
+    if apps_add: bits.append(f"{len(apps_add)} {plural(len(apps_add),'application')} added")
+    if apps_del: bits.append(f"{len(apps_del)} {plural(len(apps_del),'application')} removed")
+    if pkg_add: bits.append(f"{len(pkg_add)} installer {plural(len(pkg_add),'package')} added")
+    if pkg_del: bits.append(f"{len(pkg_del)} installer {plural(len(pkg_del),'package')} removed")
+    print('Installed software changed: ' + ', '.join(bits) if bits else 'Installed software inventory changed')
+elif name == 'automatic_start_items':
+    om,nm=hash_map(old),hash_map(new); op,np=set(om),set(nm)
+    a=np-op; r=op-np; modified={x for x in op&np if om[x]!=nm[x]}
+    bits=[]
+    if a: bits.append(f"{len(a)} startup {plural(len(a),'item')} added")
+    if r: bits.append(f"{len(r)} startup {plural(len(r),'item')} removed")
+    if modified: bits.append(f"{len(modified)} startup {plural(len(modified),'item')} modified")
+    print('Startup items changed: ' + ', '.join(bits) if bits else 'Startup item contents changed')
+elif name == 'user_and_admin_accounts':
+    def split(lines):
+        users={}; admins=set()
+        for line in lines:
+            if line.startswith('GroupMembership:'):
+                admins.update(line.split(':',1)[1].split())
+            else:
+                p=line.split()
+                if len(p)>=2 and p[-1].isdigit(): users[p[0]]=p[-1]
+        return users,admins
+    ou,oa=split(old); nu,na=split(new)
+    ua=set(nu)-set(ou); ur=set(ou)-set(nu); ag=na-oa; ar=oa-na
+    bits=[]
+    if ua: bits.append(f"{len(ua)} user {plural(len(ua),'account')} added")
+    if ur: bits.append(f"{len(ur)} user {plural(len(ur),'account')} removed")
+    if ag: bits.append(f"administrator access granted to {', '.join(sorted(ag))}")
+    if ar: bits.append(f"administrator access removed from {', '.join(sorted(ar))}")
+    print('User and administrator accounts changed: ' + ', '.join(bits) if bits else 'User or administrator account details changed')
+elif name == 'remote_access':
+    def kv(lines): return dict(x.split('=',1) for x in lines if '=' in x and not x.startswith(('COMMAND','launchd ')))
+    o,n=kv(old),kv(new)
+    labels={'remote_login':'Remote Login','remote_apple_events':'Remote Apple Events','screen_sharing':'Screen Sharing'}
+    bits=[]
+    def clean_value(k,v):
+        if v is None: return 'not recorded'
+        if ':' in v and k in ('remote_login','remote_apple_events'):
+            v=v.split(':',1)[1].strip()
+        if k == 'screen_sharing':
+            return {'loaded':'ON','not_loaded':'OFF','running':'ON','not_running':'OFF'}.get(v,v)
+        return v
+    for k in ('remote_login','screen_sharing','remote_apple_events'):
+        if o.get(k)!=n.get(k):
+            bits.append(f"{labels[k]} changed from {clean_value(k,o.get(k))} to {clean_value(k,n.get(k))}")
+    old_proc={x for x in old if any(t.lower() in x.lower() for t in ('teamviewer','anydesk','splashtop','rustdesk','screenconnect','connectwise','bomgar','beyondtrust','logmein','jumpcloud-assist','ardagent','screensharingd'))}
+    new_proc={x for x in new if any(t.lower() in x.lower() for t in ('teamviewer','anydesk','splashtop','rustdesk','screenconnect','connectwise','bomgar','beyondtrust','logmein','jumpcloud-assist','ardagent','screensharingd'))}
+    if new_proc-old_proc: bits.append(f"{len(new_proc-old_proc)} remote-support process {plural(len(new_proc-old_proc),'entry','entries')} appeared")
+    if old_proc-new_proc: bits.append(f"{len(old_proc-new_proc)} remote-support process {plural(len(old_proc-new_proc),'entry','entries')} disappeared")
+    old_ports={x for x in old if 'TCP ' in x and '(LISTEN)' in x}
+    new_ports={x for x in new if 'TCP ' in x and '(LISTEN)' in x}
+    if new_ports-old_ports: bits.append(f"{len(new_ports-old_ports)} monitored listening socket {plural(len(new_ports-old_ports),'entry','entries')} appeared")
+    if old_ports-new_ports: bits.append(f"{len(old_ports-new_ports)} monitored listening socket {plural(len(old_ports-new_ports),'entry','entries')} disappeared")
+    print('Remote access changed: ' + '; '.join(bits) if bits else 'Remote access state changed')
+elif name == 'security_settings':
+    def kv(lines): return dict(x.split('=',1) for x in lines if '=' in x)
+    o,n=kv(old),kv(new); changed=[k for k in sorted(set(o)|set(n)) if o.get(k)!=n.get(k)]
+    labels={'sip':'System Protection (SIP)','gatekeeper':'App Protection (Gatekeeper)','filevault':'FileVault','firewall':'Firewall','stealth':'Firewall stealth mode','remote_login':'Remote Login'}
+    if changed:
+        details=[f"{labels.get(k,k.replace('_',' ').title())} changed from {o.get(k,'not recorded')} to {n.get(k,'not recorded')}" for k in changed]
+        print('; '.join(details))
+    else:
+        print('macOS security settings changed')
+else:
+    total=len(added)+len(removed)
+    print(f"{name.replace('_',' ').title()} changed ({total} difference{'s' if total != 1 else ''})")
+PYSMART
+}
+
 snapshot_diff(){
-  local name="$1" severity="$2" category="$3" newfile="$4" oldfile="$SNAP/$name.current"
-  if [ ! -f "$oldfile" ]; then cp "$newfile" "$oldfile"; emit INFO "$category" "Initial baseline created for ${name//_/ }" "" "baseline:$name" baseline; return; fi
-  if ! cmp -s "$oldfile" "$newfile"; then local d; d="$(diff -u "$oldfile" "$newfile" 2>/dev/null | tail -n +3 | head -n 160)"; emit "$severity" "$category" "${name//_/ } changed" "$d" "change:$name" changed; cp "$newfile" "$oldfile"; fi
+  local name severity category newfile oldfile
+  name="$1"
+  severity="$2"
+  category="$3"
+  newfile="$4"
+  oldfile="$SNAP/$name.current"
+  if [ ! -f "$oldfile" ]; then
+    local baseline_message
+    baseline_message="$(baseline_fields "$category" | cut -d'|' -f1)"
+    cp "$newfile" "$oldfile"
+    emit INFO "$category" "$baseline_message" "" "baseline:$name" baseline
+    return
+  fi
+  if ! cmp -s "$oldfile" "$newfile"; then
+    local d message
+    d="$(diff -u "$oldfile" "$newfile" 2>/dev/null | tail -n +3 | head -n 160)"
+    message="$(smart_diff_message "$name" "$oldfile" "$newfile")"
+    emit "$severity" "$category" "$message" "$d" "change:$name" changed
+    cp "$newfile" "$oldfile"
+  fi
 }
 
 remote_processes(){ ps -axo pid=,user=,command= 2>/dev/null | awk 'BEGIN{IGNORECASE=1} /\/ARDAgent([ .\/]|$)|\/screensharingd([ .\/]|$)|jumpcloud-assist-(service|launcher)|TeamViewer|AnyDesk|Splashtop|RustDesk|ScreenConnect|ConnectWise|Bomgar|BeyondTrust|LogMeIn|RealVNC|TigerVNC/ {if($0 !~ /MacAudit|awk/) print}'; }
 
+remote_tool_match(){
+  local tool="$1" input="$2" pattern
+  case "$tool" in
+    'Apple Remote Desktop') pattern='/ARDAgent([ ./]|$)' ;;
+    'Screen Sharing') pattern='/screensharingd([ ./]|$)' ;;
+    'JumpCloud Assist') pattern='jumpcloud-assist-(service|launcher)' ;;
+    'TeamViewer') pattern='/Applications/TeamViewer\.app/Contents/MacOS/TeamViewer([[:space:]]|$)|TeamViewer_(Service|Desktop)([[:space:]]|$)' ;;
+    'AnyDesk') pattern='AnyDesk' ;;
+    'Splashtop') pattern='Splashtop' ;;
+    'RustDesk') pattern='RustDesk' ;;
+    'ScreenConnect / ConnectWise') pattern='ScreenConnect|ConnectWise' ;;
+    'BeyondTrust / Bomgar') pattern='BeyondTrust|Bomgar' ;;
+    'LogMeIn') pattern='LogMeIn' ;;
+    'VNC') pattern='RealVNC|TigerVNC|VNC Server' ;;
+    *) return 0 ;;
+  esac
+  printf '%s\n' "$input" | grep -Ei "$pattern" || true
+}
+
+remote_tool_slug(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g'; }
+
+track_remote_tool(){
+  local tool="$1" all_processes="$2" matches slug pid sockets socket_file
+  matches="$(remote_tool_match "$tool" "$all_processes")"
+  slug="$(remote_tool_slug "$tool")"
+  if [ -n "$matches" ]; then
+    set_active_state "remote-tool-$slug" 1 MEDIUM remote-software "$tool started" "$tool stopped" "$matches" "$tool was already running when monitoring started"
+  else
+    set_active_state "remote-tool-$slug" 0 MEDIUM remote-software "" "$tool stopped"
+  fi
+
+  socket_file="$(mktemp)"
+  if [ -n "$matches" ]; then
+    for pid in $(printf '%s\n' "$matches" | awk '{print $1}' | grep -E '^[0-9]+$' || true); do
+      sockets="$(lsof -nP -a -p "$pid" -i 2>/dev/null | tail -n +2 | grep -Ev '127\.0\.0\.1|\[::1\]| localhost:|->127\.0\.0\.1|->\[::1\]' || true)"
+      [ -n "$sockets" ] && { ps -p "$pid" -o pid=,user=,command= >> "$socket_file"; printf '%s\n' "$sockets" >> "$socket_file"; }
+    done
+  fi
+  if [ -s "$socket_file" ]; then
+    set_active_state "remote-socket-$slug" 1 MEDIUM remote-sockets "$tool has an external network connection" "$tool external network connection ended" "$(cat "$socket_file")" "$tool already had an external network connection when monitoring started"
+  else
+    set_active_state "remote-socket-$slug" 0 MEDIUM remote-sockets "" "$tool external network connection ended"
+  fi
+  rm -f "$socket_file"
+}
+
 collect_fast(){
-  local active rp f pid sockets
-  active="$(lsof -nP -iTCP:22 -sTCP:ESTABLISHED 2>/dev/null | tail -n +2)"; [ -n "$active" ] && set_active_state ssh 1 HIGH active-ssh "Active SSH connection detected" "SSH connection ended" "$active" || set_active_state ssh 0 HIGH active-ssh "" "SSH connection ended"
-  rp="$(remote_processes)"; [ -n "$rp" ] && set_active_state remoteproc 1 MEDIUM remote-software "Remote-support software started" "Remote-support software is no longer running" "$rp" || set_active_state remoteproc 0 MEDIUM remote-software "" "Remote-support software is no longer running"
-  f="$(mktemp)"; for pid in $(printf '%s\n' "$rp" | awk '{print $1}' | grep -E '^[0-9]+$' || true); do sockets="$(lsof -nP -a -p "$pid" -i 2>/dev/null | tail -n +2 | grep -Ev '127\.0\.0\.1|\[::1\]| localhost:|->127\.0\.0\.1|->\[::1\]' || true)"; [ -n "$sockets" ] && { ps -p "$pid" -o pid=,user=,command= >> "$f"; printf '%s\n' "$sockets" >> "$f"; }; done
-  [ -s "$f" ] && set_active_state remotesockets 1 MEDIUM remote-sockets "Remote-support software has an external connection" "Remote-support external connection ended" "$(cat "$f")" || set_active_state remotesockets 0 MEDIUM remote-sockets "" "Remote-support external connection ended"; rm -f "$f"
+  local active rp tool
+  active="$(lsof -nP -iTCP:22 -sTCP:ESTABLISHED 2>/dev/null | tail -n +2)"
+  [ -n "$active" ] && set_active_state ssh 1 HIGH active-ssh "Active SSH connection detected" "SSH connection ended" "$active" || set_active_state ssh 0 HIGH active-ssh "" "SSH connection ended"
+
+  rp="$(remote_processes)"
+  # Track each remote-support product independently. One always-running tool
+  # (for example JumpCloud Assist) must not hide TeamViewer starting/stopping.
+  for tool in 'Apple Remote Desktop' 'Screen Sharing' 'JumpCloud Assist' 'TeamViewer' 'AnyDesk' 'Splashtop' 'RustDesk' 'ScreenConnect / ConnectWise' 'BeyondTrust / Bomgar' 'LogMeIn' 'VNC'; do
+    track_remote_tool "$tool" "$rp"
+  done
+
+  # Remove legacy aggregate state files from 3.3.1 and earlier. They could only
+  # say that "some" support software was running and could not identify exits.
+  rm -f "$STATE/active-remoteproc" "$STATE/active-remotesockets"
 }
 
 collect_standard(){
   local f
-  f="$(mktemp)"; { echo "remote_login=$(systemsetup -getremotelogin 2>/dev/null)"; echo "remote_apple_events=$(systemsetup -getremoteappleevents 2>/dev/null)"; launchctl print system/com.apple.screensharing >/dev/null 2>&1 && echo screen_sharing=loaded || echo screen_sharing=not_loaded; pgrep -x ARDAgent >/dev/null 2>&1 && echo ard=running || echo ard=not_running; remote_processes; lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | awk 'NR==1 || $9 ~ /:(22|5900|3283)$/' || true; } | sort > "$f"; snapshot_diff remote_access HIGH remote-access "$f"; rm -f "$f"
+  # Remote-access configuration only. Keep process lifecycle and network
+  # connections in the fast per-tool collectors so transient PIDs, lsof output
+  # and command ordering can never trigger a remote-access settings event.
+  f="$(mktemp)"
+  {
+    printf 'remote_login=%s\n' "$(systemsetup -getremotelogin 2>/dev/null || echo unknown)"
+    launchctl print system/com.apple.screensharing >/dev/null 2>&1 && printf 'screen_sharing=loaded\n' || printf 'screen_sharing=not_loaded\n'
+    printf 'remote_apple_events=%s\n' "$(systemsetup -getremoteappleevents 2>/dev/null || echo unknown)"
+  } > "$f"
+  snapshot_diff remote_access HIGH remote-access "$f"
+  rm -f "$f"
   f="$(mktemp)"; { find /Users -path '*/.ssh/authorized_keys' -type f -maxdepth 4 -exec shasum -a 256 {} \; 2>/dev/null | sort; [ -f /var/root/.ssh/authorized_keys ] && shasum -a 256 /var/root/.ssh/authorized_keys; [ -f /etc/ssh/sshd_config ] && shasum -a 256 /etc/ssh/sshd_config; } > "$f"; snapshot_diff ssh_configuration HIGH ssh "$f"; rm -f "$f"
   f="$(mktemp)"; { dscl . list /Users UniqueID 2>/dev/null | awk '$2 >= 500 {print}' | sort; dscl . read /Groups/admin GroupMembership 2>/dev/null; } > "$f"; snapshot_diff user_and_admin_accounts CRITICAL identity "$f"; rm -f "$f"
-  f="$(mktemp)"; { echo "sip=$(csrutil status 2>/dev/null)"; echo "gatekeeper=$(spctl --status 2>/dev/null)"; echo "filevault=$(fdesetup status 2>/dev/null)"; echo "firewall=$(defaults read /Library/Preferences/com.apple.alf globalstate 2>/dev/null || echo unknown)"; echo "stealth=$(defaults read /Library/Preferences/com.apple.alf stealthenabled 2>/dev/null || echo unknown)"; echo "remote_login=$(systemsetup -getremotelogin 2>/dev/null)"; } > "$f"; snapshot_diff security_settings HIGH security-settings "$f"; rm -f "$f"
+  f="$(mktemp)"; { echo "sip=$(csrutil status 2>/dev/null)"; echo "gatekeeper=$(spctl --status 2>/dev/null)"; echo "filevault=$(fdesetup status 2>/dev/null)"; echo "firewall=$(firewall_state)"; echo "stealth=$(stealth_state)"; } > "$f"; snapshot_diff security_settings HIGH security-settings "$f"; rm -f "$f"
   f="$(mktemp)"; { for d in /Library/LaunchDaemons /Library/LaunchAgents /Users/*/Library/LaunchAgents; do [ -d "$d" ] && find "$d" -maxdepth 1 -type f -name '*.plist' -exec shasum -a 256 {} \; 2>/dev/null; done; find /etc/periodic -type f -maxdepth 3 -exec shasum -a 256 {} \; 2>/dev/null; } | sort > "$f"; snapshot_diff automatic_start_items HIGH persistence "$f"; rm -f "$f"
 }
 
@@ -190,6 +418,16 @@ PYRET
 
 run_all(){
   require_root; setup; acquire_lock; local started completed fast='null' standard='null' slow='null' failures=0
+  # MacAudit 3.3.0 and earlier could accidentally share standard/slow snapshot names
+  # because of Bash dynamic scoping in snapshot_diff(). Those files are invalid.
+  rm -f "$SNAP/standard.current" "$SNAP/slow.current"
+  # 3.3.3 changes remote_access.current to a deterministic configuration-only
+  # schema. Discard the old mixed process/socket snapshot once so it cannot
+  # create a migration-only HIGH event.
+  if [ ! -f "$STATE/schema-3.3.3" ]; then
+    rm -f "$SNAP/remote_access.current"
+    : > "$STATE/schema-3.3.3"
+  fi
   started="$(now_iso)"
   due fast "$FAST_INTERVAL_SECONDS" && fast="$(run_group fast collect_fast)" || true
   due standard "$STANDARD_INTERVAL_SECONDS" && standard="$(run_group standard collect_standard)" || true
@@ -203,4 +441,4 @@ status(){ setup; echo "MacAudit $VERSION"; [ -r "$HEALTH" ] && cat "$HEALTH" || 
 open_dashboard(){ setup; local token_file="$BASE/dashboard.token" token uid user url; [ -r "$token_file" ] || { echo "Dashboard token is missing. Re-run the installer." >&2; exit 1; }; token="$(cat "$token_file")"; uid="$(stat -f '%u' /dev/console 2>/dev/null || echo 0)"; user="$(stat -f '%Su' /dev/console 2>/dev/null || true)"; url="http://127.0.0.1:$DASHBOARD_PORT/?token=$token"; echo "Opening the private MacAudit dashboard."; [ "$uid" -gt 500 ] && launchctl asuser "$uid" sudo -u "$user" open "$url" >/dev/null 2>&1 || echo "$url"; }
 
 case "${1:-run}" in
- run) run_all;; status) require_root; status;; dashboard) require_root; open_dashboard;; report) require_root; setup; tail -n "${2:-100}" "$EVENTS";; baseline) require_root; setup; rm -f "$SNAP"/*.current; run_all;; notify-test) require_root; setup; emit HIGH test "MacAudit notification test succeeded" "Local notification test" "notify-test-$(date +%s)" test;; *) echo 'Usage: macaudit {run|status|dashboard|report [lines]|baseline|notify-test}'; exit 2;; esac
+ run) run_all;; status) require_root; status;; dashboard) require_root; open_dashboard;; report) require_root; setup; tail -n "${2:-100}" "$EVENTS";; baseline) require_root; setup; rm -f "$SNAP"/*.current "$STATE"/due-*; run_all;; notify-test) require_root; setup; emit HIGH test "MacAudit notification test succeeded" "Local notification test" "notify-test-$(date +%s)" test;; *) echo 'Usage: macaudit {run|status|dashboard|report [lines]|baseline|notify-test}'; exit 2;; esac

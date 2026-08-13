@@ -17,11 +17,12 @@
       <div id="healthBadge" class="live"><span></span><b>Checking</b> · refreshes every 10s</div>
     </header>
 
-    <section class="cards" id="severityCards" aria-label="Filter event timeline by severity"></section>
+    <div class="history-note"><b>Recorded event history</b><span>These counts are events recorded in the selected date range, not your current security status.</span></div>
+    <section class="cards" id="severityCards" aria-label="Filter event history by severity"></section>
 
     <section class="panel events-panel" id="eventTimeline">
       <div class="panel-title event-head">
-        <div><h2>Event timeline</h2><span id="eventCount">0 events</span></div>
+        <div><h2>Event history</h2><span id="eventCount">0 events</span></div>
         <div class="filters">
           <select id="datePreset" aria-label="Filter by date">
             <option value="today" selected>Today</option>

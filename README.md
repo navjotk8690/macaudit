@@ -1,6 +1,6 @@
 # MacAudit
 
-> **Version 3.2.5**
+> **Version 3.3.3**
 
 MacAudit is a **local, read-only macOS auditing system** focused on remote access, SSH, privacy permissions, MDM, persistence, user accounts, security controls, installed software, and evidence timelines.
 
@@ -217,36 +217,48 @@ If a banner does not appear, check Notification settings for `osascript` or Scri
 
 ---
 
-# What's New in 3.2.5
+# What's New in 3.3.3
 
-### Added
+- Remote-access state now compares only stable macOS sharing settings.
+- Remote-support app lifecycle and external network activity are tracked separately.
+- Harmless process/socket ordering changes no longer create remote-access HIGH events.
+- Initial baseline events now clearly explain that MacAudit recorded a starting point.
+- Current security posture highlights FileVault, Firewall, SIP and Gatekeeper when disabled.
+- Severity cards are labelled as historical event counts, not current security status.
+- Firewall detection now uses Apple's Application Firewall command when available.
 
-- Authenticated dashboard
-- Clickable severity cards
-- Date filtering
-- Human-readable summaries
-- Expandable raw evidence
-- Collector heartbeat
-- Active and resolved event tracking
+---
+
+# What's New in 3.3.2
+
+### Remote-tool lifecycle tracking
+
+Remote-support products are tracked independently. Starting or closing TeamViewer no longer gets hidden by an always-running management tool such as JumpCloud Assist. MacAudit records specific lifecycle events such as **TeamViewer started** and **TeamViewer stopped**, and separately records when that tool gains or loses an external network connection. Background TeamViewer keychain/uninstaller helpers do not by themselves keep the dashboard marked as Running.
+
+On the first scan, a tool that is already active is described as **already running when monitoring started** rather than falsely claiming it just started.
+
+### Intelligent event descriptions
+
+MacAudit interprets baseline differences before presenting them on the dashboard. The default event view explains the actual change while the original forensic output remains available under **System log / raw evidence**. Initial baseline events explicitly explain that MacAudit is recording a starting point for future comparisons.
+
+Examples include:
+
+- `3 applications added, 1 application removed` instead of a long software inventory diff
+- `2 startup items added, 1 startup item modified` while retaining SHA-256 hashes in raw evidence
+- `Administrator access granted to alice` instead of an unexplained group-membership line
+- `FileVault changed from ... to ...` when a single macOS security control changes
+
+### Preserved from 3.2.5
+
+- Authenticated local dashboard
+- Clickable severity cards and date filtering
+- Human-readable explanations and recommended actions
+- Expandable raw system evidence
+- Collector heartbeat and active/resolved event tracking
+- Native notifications
 - Installer verification
+- 90-day timestamp-based event retention
 
-### Improved
-
-- Dashboard layout
-- Remote-tool detection
-- SSH detection
-- Apple Silicon support
-- Configuration validation
-- Event retention
-
-### Fixed
-
-- Initial scan verification
-- Notification cooldown
-- Collector stale-lock recovery
-- Bash `set -u` startup issue
-- Dashboard label wrapping
-- Event pruning
 
 ---
 
