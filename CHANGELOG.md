@@ -1,3 +1,36 @@
+## 3.4.23
+
+- Ignore `~/.zsh_sessions/**` shell-session housekeeping in Data Movement.
+- Never report a watched home root itself as newly created because of low-level `mkdir`/`mkdirat` probes.
+- Record lightweight local presence samples for a compact active/idle/locked daily summary.
+- Record the collector version on new events so newer events can be distinguished from older detector behaviour.
+- No changes to move/rename or Trash correlation.
+
+## 3.4.22
+
+- Fixed the Running applications dashboard layout so it uses the available page width instead of occupying only the left half of a two-column grid.
+- Running application role groups now arrange responsively across two columns on normal desktop widths and three columns on very wide displays.
+- macOS system processes remain collapsed and span the full applications section.
+- No collector, data-movement, Trash, software-download, or process-classification logic changed.
+
+# 3.4.22
+
+- Refine running-process classification using known application identities and executable paths rather than root ownership alone.
+- Add an **Unclassified processes** group so unknown processes are not presented as safe to quit or as security software without evidence.
+- Keep Xcode and other interactive application bundles in **User apps**.
+- Rename groups to **Background services & helpers** and **Security, VPN & remote access** for clearer intent.
+- Remove the redundant live Presence card; presence detection remains available as historical event context and dashboard filtering.
+- No changes to data-movement, move correlation, Trash lifecycle, or software-download detection.
+
+# 3.4.20
+
+- Group Running applications into User apps, Background apps & helpers, Security & remote access, and macOS system processes.
+- Collapse macOS system processes by default so normal applications are easier to review.
+- Move PID, user, runtime and application path into expandable per-process details instead of the main row.
+- Add a current Presence panel showing real local input state, idle duration, screen state and system-awake state.
+- Presence remains observational only: MacAudit does not synthesize keyboard or mouse input or alter idle state.
+- Preserve the 3.4.19 Open/Save false-positive filter and the existing move/rename/Trash engine unchanged.
+
 # 3.4.19
 
 - Suppress false `Folder created` events when `com.apple.appkit.xpc.openAndSave` probes existing standard home folders with `mkdirat`.

@@ -20,6 +20,12 @@
     <div class="history-note"><b>Recorded event history</b><span>These counts are events recorded in the selected date range, not your current security status.</span></div>
     <section class="cards" id="severityCards" aria-label="Filter event history by severity"></section>
 
+    <section class="panel day-summary-panel">
+      <div class="panel-title compact-title"><div><h2>Activity summary</h2><span id="activityPeriod">Presence sampling for the selected date range</span></div></div>
+      <div id="activitySummary" class="day-summary"></div>
+      <div id="activitySessions" class="activity-sessions"></div>
+    </section>
+
     <section class="panel events-panel" id="eventTimeline">
       <div class="panel-title event-head">
         <div><h2>Event history</h2><span id="eventCount">0 events</span></div>
@@ -60,9 +66,11 @@
       </article>
     </section>
 
-    <section class="panel monitor-panel">
-      <div class="panel-title compact-title"><div><h2>Running applications</h2><span>GUI and selected security-relevant processes</span></div></div>
-      <div id="applications" class="tools"></div>
+    <section class="grid activity-grid">
+      <article class="panel apps-panel">
+        <div class="panel-title compact-title"><div><h2>Running applications</h2><span>Grouped by role to make the list easier to review</span></div></div>
+        <div id="applications" class="app-groups"></div>
+      </article>
     </section>
 
     <section class="panel monitor-panel">

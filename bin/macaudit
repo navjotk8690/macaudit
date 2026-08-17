@@ -3,7 +3,7 @@ set -u
 PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin
 umask 077
 
-VERSION="3.4.19"
+VERSION="3.4.23"
 BASE="/Library/Application Support/MacAudit"
 LOG_DIR="/Library/Logs/MacAudit"
 CONF="$BASE/macaudit.conf"
@@ -14,6 +14,7 @@ DASH_EVENTS="$BASE/dashboard-events.jsonl"
 HEALTH="$BASE/health.json"
 LOCK="$STATE/run.lock"
 NOTIFY_STATE="$STATE/notifications"
+PRESENCE_SAMPLES="$STATE/presence-samples.tsv"
 
 RETENTION_DAYS=90 ENABLE_NOTIFICATIONS=1 NOTIFY_MIN_SEVERITY=HIGH
 NOTIFICATION_COOLDOWN_SECONDS=900 ENABLE_UNIFIED_LOG_SCAN=1 ENABLE_TCC_SCAN=1
@@ -22,8 +23,8 @@ FAST_INTERVAL_SECONDS=60 STANDARD_INTERVAL_SECONDS=300 SLOW_INTERVAL_SECONDS=180
 ENABLE_DATA_MOVEMENT_SCAN=1 DATA_MOVEMENT_MIN_FILE_MB=1 DATA_MOVEMENT_LOOKBACK_MINUTES=10
 DATA_MOVEMENT_TRACK_MIN_BYTES=0 DATA_MOVEMENT_MAX_DROP_PERCENT=35
 DATA_MOVEMENT_RECORD_FILENAMES=1 DATA_MOVEMENT_WATCH_HOME=1 DATA_MOVEMENT_WATCH_FOLDERS="Desktop,Documents,Downloads"
-DATA_MOVEMENT_EXCLUDE_DIRS="Library,.Trash,node_modules,.git,.venv,venv,__pycache__,.pyenv,.cache,.npm,.local,.cargo,.rustup,.gradle,DerivedData,build,dist,.TemporaryItems,.Spotlight-V100,.fseventsd"
-DATA_MOVEMENT_BUILTIN_EXCLUDE_DIRS="Library,.Trash,node_modules,.git,.venv,venv,__pycache__,.pyenv,.cache,.npm,.local,.cargo,.rustup,.gradle,DerivedData,build,dist,.TemporaryItems,.Spotlight-V100,.fseventsd"
+DATA_MOVEMENT_EXCLUDE_DIRS="Library,.Trash,.zsh_sessions,node_modules,.git,.venv,venv,__pycache__,.pyenv,.cache,.npm,.local,.cargo,.rustup,.gradle,DerivedData,build,dist,.TemporaryItems,.Spotlight-V100,.fseventsd"
+DATA_MOVEMENT_BUILTIN_EXCLUDE_DIRS="Library,.Trash,.zsh_sessions,node_modules,.git,.venv,venv,__pycache__,.pyenv,.cache,.npm,.local,.cargo,.rustup,.gradle,DerivedData,build,dist,.TemporaryItems,.Spotlight-V100,.fseventsd"
 PERSISTENCE_METADATA_COOLDOWN_SECONDS=21600 PERSISTENCE_CHANGE_COOLDOWN_SECONDS=21600
 ENABLE_DATA_MOVEMENT_WATCHER=1 DATA_MOVEMENT_INVENTORY_WARNING_COOLDOWN_SECONDS=21600 DATA_MOVEMENT_WATCH_ALL_USERS=0 DATA_MOVEMENT_MAX_RECONCILE_CHANGES=200
 PRESENCE_AWAY_SECONDS=600 ENABLE_SOFTWARE_DOWNLOAD_SCAN=1
@@ -202,6 +203,20 @@ presence_description(){
   esac
 }
 
+record_presence_sample(){
+  local presence state idle user now cutoff tmp
+  presence="$(user_presence)"
+  IFS='|' read -r state idle user <<< "$presence"
+  now="$(date +%s)"
+  printf '%s\t%s\t%s\t%s\n' "$now" "${state:-UNKNOWN}" "${idle:-0}" "${user:-unknown}" >> "$PRESENCE_SAMPLES"
+  chmod 600 "$PRESENCE_SAMPLES" 2>/dev/null || true
+  # Keep presence history bounded to the same retention window as audit events.
+  cutoff=$((now - (RETENTION_DAYS + 1) * 86400))
+  tmp="$PRESENCE_SAMPLES.tmp.$$"
+  awk -F '\t' -v cutoff="$cutoff" '$1+0 >= cutoff' "$PRESENCE_SAMPLES" > "$tmp" 2>/dev/null || true
+  mv "$tmp" "$PRESENCE_SAMPLES" 2>/dev/null || true
+}
+
 emit(){
   local severity="$1" category="$2" message="$3" evidence="${4:-}" key="${5:-$2|$3}" state="${6:-changed}"
   local fp hash oldfile old ts host user fields title why normal action presence presence_state idle_seconds presence_user presence_label
@@ -217,8 +232,8 @@ emit(){
   if [ "$state" = baseline ]; then fields="$(baseline_fields "$category")"; else fields="$(friendly_fields "$category")"; fi
   IFS='|' read -r title why normal action <<< "$fields"
   evidence="$(printf '%s' "$evidence" | head -c 12000)"
-  printf '{"timestamp":"%s","severity":"%s","category":"%s","state":"%s","host":"%s","console_user":"%s","presence_state":"%s","idle_seconds":%s,"presence_label":"%s","message":"%s","evidence":"%s"}\n' "$ts" "$severity" "$category" "$state" "$(printf '%s' "$host"|json_escape)" "$(printf '%s' "$user"|json_escape)" "$presence_state" "${idle_seconds:-0}" "$(printf '%s' "$presence_label"|json_escape)" "$(printf '%s' "$message"|json_escape)" "$(printf '%s' "$evidence"|json_escape)" >> "$EVENTS"
-  printf '{"timestamp":"%s","severity":"%s","category":"%s","state":"%s","presence_state":"%s","idle_seconds":%s,"presence_label":"%s","title":"%s","summary":"%s","normal_when":"%s","recommended_action":"%s","message":"%s","evidence":"%s"}\n' "$ts" "$severity" "$category" "$state" "$presence_state" "${idle_seconds:-0}" "$(printf '%s' "$presence_label"|json_escape)" "$(printf '%s' "$title"|json_escape)" "$(printf '%s' "$why"|json_escape)" "$(printf '%s' "$normal"|json_escape)" "$(printf '%s' "$action"|json_escape)" "$(printf '%s' "$message"|json_escape)" "$(printf '%s' "$evidence"|json_escape)" >> "$DASH_EVENTS"
+  printf '{"timestamp":"%s","severity":"%s","category":"%s","state":"%s","collector_version":"%s","host":"%s","console_user":"%s","presence_state":"%s","idle_seconds":%s,"presence_label":"%s","message":"%s","evidence":"%s"}\n' "$ts" "$severity" "$category" "$state" "$VERSION" "$(printf '%s' "$host"|json_escape)" "$(printf '%s' "$user"|json_escape)" "$presence_state" "${idle_seconds:-0}" "$(printf '%s' "$presence_label"|json_escape)" "$(printf '%s' "$message"|json_escape)" "$(printf '%s' "$evidence"|json_escape)" >> "$EVENTS"
+  printf '{"timestamp":"%s","severity":"%s","category":"%s","state":"%s","collector_version":"%s","presence_state":"%s","idle_seconds":%s,"presence_label":"%s","title":"%s","summary":"%s","normal_when":"%s","recommended_action":"%s","message":"%s","evidence":"%s"}\n' "$ts" "$severity" "$category" "$state" "$VERSION" "$presence_state" "${idle_seconds:-0}" "$(printf '%s' "$presence_label"|json_escape)" "$(printf '%s' "$title"|json_escape)" "$(printf '%s' "$why"|json_escape)" "$(printf '%s' "$normal"|json_escape)" "$(printf '%s' "$action"|json_escape)" "$(printf '%s' "$message"|json_escape)" "$(printf '%s' "$evidence"|json_escape)" >> "$DASH_EVENTS"
   log "[$severity] $category: $message"; notify_user "$severity" "$category" "$message" "$fp"
 }
 
@@ -598,7 +613,7 @@ datawatch_excluded(){
   # Treat the contents of Photos library bundles as application-private churn.
   # The bundle root itself is handled separately so genuine user moves/deletes
   # of a .photoslibrary are still observable when Finder performs them.
-  case "$path" in */.codex/.tmp/*|*/Photos\ Library.photoslibrary/*|*.photoslibrary/*) return 0;; esac
+  case "$path" in */.zsh_sessions|*/.zsh_sessions/*|*/.codex/.tmp/*|*/Photos\ Library.photoslibrary/*|*.photoslibrary/*) return 0;; esac
   IFS=','
   for name in $DATA_MOVEMENT_EXCLUDE_DIRS,$DATA_MOVEMENT_BUILTIN_EXCLUDE_DIRS; do
     case "$path" in */"$name"|*/"$name"/*) IFS="$oldifs"; return 0;; esac
@@ -980,6 +995,17 @@ datawatch(){
       [ "$allowed" -eq 1 ] && break
     done <<< "$watch_roots"
     [ "$allowed" -eq 1 ] || continue
+
+    # A user's home directory is a pre-existing watch root. Low-level macOS
+    # helpers can issue mkdir/mkdirat probes against it, but those calls do not
+    # mean the home directory was newly created. Never emit a creation event for
+    # a watch root itself; genuine child-folder creation remains visible.
+    if [ "$op" = "MKDIR" ]; then
+      while IFS= read -r root; do
+        [ -n "$root" ] || continue
+        [ "$path" = "$root" ] && continue 2
+      done <<< "$watch_roots"
+    fi
 
     base_name="$(basename "$path")"
     case "$base_name" in .DS_Store|.localized|._*|~\$*|.dat.nosync*|.AU.*|.com.google.Chrome.*|*.crdownload|*.sqlite-wal|*.sqlite-shm) continue;; esac
@@ -1699,7 +1725,13 @@ run_all(){
   if [ ! -f "$STATE/schema-3.4.18" ]; then
     : > "$STATE/schema-3.4.18"
   fi
+  # 3.4.23 records lightweight presence samples for dashboard activity summaries.
+  # This is local runtime state only and does not create audit events.
+  if [ ! -f "$STATE/schema-3.4.23" ]; then
+    : > "$STATE/schema-3.4.23"
+  fi
   started="$(now_iso)"
+  record_presence_sample
   due fast "$FAST_INTERVAL_SECONDS" && fast="$(run_group fast collect_fast)" || true
   due standard "$STANDARD_INTERVAL_SECONDS" && standard="$(run_group standard collect_standard)" || true
   due data_movement "$DATA_MOVEMENT_INTERVAL_SECONDS" && data_movement="$(run_group data_movement collect_data_group)" || true

@@ -1,6 +1,6 @@
 # MacAudit
 
-> **Version 3.4.19**
+> **Version 3.4.23**
 
 MacAudit is a **local, read-only macOS auditing system** focused on remote access, SSH, privacy permissions, MDM, persistence, user accounts, security controls, installed software, and evidence timelines.
 
@@ -251,9 +251,13 @@ If a banner does not appear, check Notification settings for `osascript` or Scri
 ---
 
 
-# What's New in 3.4.19
+# What's New in 3.4.23
 
-3.4.19 is a narrow noise-reduction patch. It suppresses false folder-creation events caused by macOS AppKit's Open/Save panel probing the user's existing home, Desktop, Documents, Downloads, Pictures, Movies, and Music folders. Real Finder/user-created subfolders remain monitored.
+3.4.23 reduces filesystem noise from shell-session housekeeping and bogus home-root mkdir probes, records the collector version on new events, and adds a compact local activity summary built from minute-level presence samples. The summary distinguishes active, away/idle, locked/logged-out and unobserved periods without synthesising input or changing macOS presence state.
+
+The always-visible Presence card has been removed because current awake/unlocked state adds little value while the user is at the Mac. MacAudit still records presence with events and keeps the **While I was away / locked**, **While I was active**, **Screen locked**, **Logged out**, and **Presence unknown** event filters.
+
+3.4.19 added a narrow noise-reduction fix that suppresses false folder-creation events caused by macOS AppKit's Open/Save panel probing the user's existing home, Desktop, Documents, Downloads, Pictures, Movies, and Music folders. Real Finder/user-created subfolders remain monitored.
 
 3.4.18 was a polish and repository-safety release. Periodic Data Movement reconciliation now recognises recent live move/delete events for both a source path and its descendants, preventing a second vague `destination not determined` event after an already-resolved directory operation. Emptying a folder from Trash now reports the top-level Trash item rather than every child file inside it.
 

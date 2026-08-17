@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import hashlib, hmac, json, os, re, secrets, subprocess, threading, time
-from datetime import datetime, timezone
+import hashlib, hmac, json, os, plistlib, re, secrets, subprocess, threading, time
+from datetime import datetime, timedelta, timezone
 from collections import Counter, deque
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -9,8 +9,98 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 
 HOST='127.0.0.1'; BASE=Path('/Library/Application Support/MacAudit'); WEB=Path(__file__).resolve().parent/'web'
-TOKEN_FILE=BASE/'dashboard.token'; EVENTS=BASE/'dashboard-events.jsonl'; RAW_EVENTS=Path('/Library/Logs/MacAudit/events.jsonl'); HEALTH=BASE/'health.json'
+TOKEN_FILE=BASE/'dashboard.token'; EVENTS=BASE/'dashboard-events.jsonl'; RAW_EVENTS=Path('/Library/Logs/MacAudit/events.jsonl'); HEALTH=BASE/'health.json'; PRESENCE_SAMPLES=BASE/'state'/'presence-samples.tsv'
 PORT=int(os.environ.get('MACAUDIT_DASHBOARD_PORT','8765'));
+
+SYSTEM_APP_NAMES = {
+    'AirPlayUIAgent','AXVisualSupportAgent','BackgroundTaskManagementAgent','ControlCenter',
+    'CoreLocationAgent','CoreServicesUIAgent','Dock','Finder','identityservicesd','imagent',
+    'IMAutomaticHistoryDeletionAgent','Keychain Circle Notification','LinkedNotesUIService','loginwindow',
+    'MobileDeviceUpdater','NotificationCenter','Spotlight','SystemUIServer','TextInputMenuAgent',
+    'TextInputSwitcher','UIKitSystem','universalAccessAuthWarn','UserNotificationCenter','WallpaperAgent',
+    'WiFiAgent','WindowManager'
+}
+SECURITY_REMOTE_NAMES = {
+    'EndpointAgentDaemon','ExpressVPN','JumpCloudApp','Microsoft Remote Desktop','RTProtectionDaemon','UTunnel'
+}
+BACKGROUND_NAMES = {
+    'Adobe Desktop Service','AdobeIPCBroker','CCXProcess','Core Sync','Creative Cloud',
+    'Creative Cloud Helper','DisplayLink Manager','Microsoft AutoUpdate','OneDrive','Postman Agent'
+}
+USER_APP_NAMES = {
+    '1Password','Adobe Acrobat','Google Chrome','Mail','Messages','Microsoft Excel','Microsoft Outlook',
+    'Microsoft Teams','Microsoft Word','Notes','Script Editor','Slack','Spotify','SQLPro Studio',
+    'Sublime Text','Terminal','Visual Studio Code','Xcode'
+}
+AMBIGUOUS_NAMES = {'UserAgent','SettingsDaemon','System Monitoring'}
+BACKGROUND_NAME_RE = re.compile(r'(helper|agent|daemon|service|sync|updater|update|broker|manager)$', re.I)
+
+
+def application_role(name, path, user):
+    # Prefer concrete identity/path evidence over a generic process-name guess.
+    if path.startswith('/System/') or name in SYSTEM_APP_NAMES:
+        return 'system'
+    if name in SECURITY_REMOTE_NAMES:
+        return 'security_remote'
+    if name in USER_APP_NAMES:
+        return 'user'
+    if name in BACKGROUND_NAMES:
+        return 'background'
+    if name in AMBIGUOUS_NAMES:
+        return 'unclassified'
+    # Normal .app bundles launched from the user's or system Applications folders are
+    # treated as user apps unless their name clearly identifies a helper component.
+    if (path.startswith('/Applications/') or '/Applications/' in path) and not BACKGROUND_NAME_RE.search(name):
+        return 'user'
+    if BACKGROUND_NAME_RE.search(name):
+        return 'background'
+    # Root ownership alone is not enough evidence to call something security-related
+    # or disposable. Unknown processes are shown separately for review.
+    return 'unclassified'
+
+def live_presence():
+    user=command('/usr/bin/stat','-f','%Su','/dev/console')
+    if not user or user in {'root','loginwindow'}:
+        return {'state':'LOGGED_OUT','input_state':'NO USER','idle_seconds':0,'user':user or 'none','screen':'LOGGED OUT','system':'AWAKE'}
+    idle_seconds=None
+    idle_raw=command('/usr/sbin/ioreg','-c','IOHIDSystem','-r','-d','1')
+    m=re.search(r'"?HIDIdleTime"?\s*=\s*(\d+)', idle_raw)
+    if m:
+        idle_seconds=int(m.group(1))//1_000_000_000
+    locked=False
+    try:
+        raw=subprocess.run(['/usr/sbin/ioreg','-n','Root','-d1','-a'],capture_output=True,timeout=3,check=False).stdout
+        roots=plistlib.loads(raw) if raw else []
+        users=(roots[0] if roots else {}).get('IOConsoleUsers',[])
+        for item in users:
+            item_user=str(item.get('kCGSSessionUserNameKey',item.get('CGSSessionUserNameKey','')))
+            if item_user==user:
+                locked=bool(item.get('CGSSessionScreenIsLocked'))
+                break
+    except Exception:
+        pass
+    display_raw=command('/usr/sbin/ioreg','-r','-n','IODisplayWrangler','-d','1')
+    display_asleep=bool(re.search(r'"CurrentPowerState"\s*=\s*[0-3](?:\s|$)',display_raw))
+    away_threshold=600
+    try:
+        conf=(BASE/'macaudit.conf').read_text()
+        mm=re.search(r'^PRESENCE_AWAY_SECONDS=(\d+)\s*$',conf,re.M)
+        if mm: away_threshold=max(60,int(mm.group(1)))
+    except OSError:
+        pass
+    if locked:
+        state='LOCKED'; screen='LOCKED'
+    elif display_asleep:
+        state='AWAY'; screen='DISPLAY ASLEEP'
+    elif idle_seconds is None:
+        state='UNKNOWN'; screen='UNLOCKED'
+    elif idle_seconds>=away_threshold:
+        state='AWAY'; screen='UNLOCKED'
+    else:
+        state='ACTIVE'; screen='UNLOCKED'
+    input_state='ACTIVE' if idle_seconds is not None and idle_seconds<away_threshold else 'IDLE' if idle_seconds is not None else 'UNKNOWN'
+    return {'state':state,'input_state':input_state,'idle_seconds':idle_seconds or 0,'user':user,'screen':screen,'system':'AWAKE'}
+
 REMOTE_TOOLS = {
     "Apple Remote Desktop": [r"/ARDAgent(?:\s|$)"],
     "Screen Sharing": [r"/screensharingd(?:\s|$)"],
@@ -57,7 +147,7 @@ def live_status():
         key=(user,app_path)
         if key in seen_apps: continue
         seen_apps.add(key)
-        applications.append({'name':name,'pid':int(pid),'user':user,'elapsed':elapsed,'path':app_path,'executable':exe})
+        applications.append({'name':name,'pid':int(pid),'user':user,'elapsed':elapsed,'path':app_path,'executable':exe,'role':application_role(name,app_path,user)})
     applications.sort(key=lambda x:x['name'].lower())
     tools={name:any(re.search(pattern, line, re.IGNORECASE) for line in lines for pattern in patterns) for name,patterns in REMOTE_TOOLS.items()}
     sip=contains_on(command('/usr/bin/csrutil','status'))
@@ -72,7 +162,7 @@ def live_status():
         'remote_login':remote_login, 'remote_apple_events':remote_apple,
         'screen_sharing_loaded':screen, 'ard_running':tools.get('Apple Remote Desktop',False),
         'sip_on':sip, 'gatekeeper_on':gatekeeper, 'filevault_on':filevault,
-        'firewall_on':firewall, 'tools':tools, 'applications':applications,
+        'firewall_on':firewall, 'tools':tools, 'applications':applications, 'presence':live_presence(),
     }
 
 def monitoring_config():
@@ -133,6 +223,62 @@ def filter_events(events, qs):
         out.append(event)
     return out
 
+def activity_summary(qs):
+    now=datetime.now(timezone.utc)
+    requested_start=parse_bound(qs.get('date_from',[''])[0])
+    requested_end=parse_bound(qs.get('date_to',[''])[0]) or now
+    requested_end=min(requested_end,now)
+    rows=[]
+    try:
+        for raw in PRESENCE_SAMPLES.read_text(errors='replace').splitlines():
+            parts=raw.split('\t')
+            if len(parts)<3: continue
+            try: epoch=int(parts[0]); idle=int(parts[2])
+            except ValueError: continue
+            rows.append((datetime.fromtimestamp(epoch,timezone.utc),parts[1].upper(),idle))
+    except OSError:
+        pass
+    rows.sort(key=lambda x:x[0])
+    if not rows:
+        return {'available':False,'message':'Activity tracking begins after installing MacAudit 3.4.23.'}
+    first=rows[0][0]
+    start=max(requested_start or first,first)
+    end=max(start,requested_end)
+    selected=[r for r in rows if start<=r[0]<=end]
+    if not selected:
+        return {'available':False,'tracking_started':first.isoformat().replace('+00:00','Z'),'message':'No presence samples were recorded in this period.'}
+    totals={'ACTIVE':0,'AWAY':0,'LOCKED':0,'LOGGED_OUT':0,'UNKNOWN':0}
+    sessions=[]; max_contiguous=180; nominal=60
+    for i,(ts,state,idle) in enumerate(selected):
+        nxt=selected[i+1][0] if i+1<len(selected) else end
+        delta=max(0,(nxt-ts).total_seconds())
+        credited=min(delta,nominal if delta>max_contiguous else delta)
+        state=state if state in totals else 'UNKNOWN'
+        totals[state]+=credited
+        session_end=ts+timedelta(seconds=credited)
+        if credited<=0: continue
+        if sessions and sessions[-1]['state']==state and (ts-sessions[-1]['end']).total_seconds()<=max_contiguous:
+            sessions[-1]['end']=session_end
+        else:
+            sessions.append({'state':state,'start':ts,'end':session_end})
+    observed=sum(totals.values())
+    tracked=max(0,(end-start).total_seconds())
+    unobserved=max(0,tracked-observed)
+    compact=[]
+    for sess in sessions[-8:]:
+        compact.append({'state':sess['state'],'start':sess['start'].isoformat().replace('+00:00','Z'),'end':sess['end'].isoformat().replace('+00:00','Z'),'seconds':int((sess['end']-sess['start']).total_seconds())})
+    return {
+        'available':True,'tracking_started':first.isoformat().replace('+00:00','Z'),
+        'period_start':start.isoformat().replace('+00:00','Z'),'period_end':end.isoformat().replace('+00:00','Z'),
+        'active_seconds':int(totals['ACTIVE']),
+        'idle_seconds':int(totals['AWAY']),
+        'locked_seconds':int(totals['LOCKED']),
+        'logged_out_seconds':int(totals['LOGGED_OUT']),
+        'unknown_seconds':int(totals['UNKNOWN']),
+        'observed_seconds':int(observed),'unobserved_seconds':int(unobserved),
+        'sessions':compact
+    }
+
 def token():
     try: return TOKEN_FILE.read_text().strip()
     except OSError: return ''
@@ -177,7 +323,7 @@ class Server(ThreadingHTTPServer):
     daemon_threads=True; request_queue_size=20
 
 class Handler(BaseHTTPRequestHandler):
-    server_version='MacAuditDashboard/3.4.13'; protocol_version='HTTP/1.1'
+    server_version='MacAuditDashboard/3.4.23'; protocol_version='HTTP/1.1'
     def log_message(self,*_): pass
     def common(self,ctype,length):
         self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(length)); self.send_header('Cache-Control','no-store')
@@ -213,7 +359,7 @@ class Handler(BaseHTTPRequestHandler):
                     age=(datetime.now(timezone.utc)-datetime.fromisoformat(completed.replace('Z','+00:00'))).total_seconds()
                     if age>600: status='stale'
                 except Exception: status='unknown'
-            return self.json({'severity':severity,'total':len(filtered),'active_count':len(active),'health':health,'collector_status':status,'status':live_status(),'monitoring':monitoring_config()})
+            return self.json({'severity':severity,'total':len(filtered),'active_count':len(active),'health':health,'collector_status':status,'status':live_status(),'monitoring':monitoring_config(),'activity':activity_summary(qs)})
         if parsed.path=='/api/health': return self.json({'ok':True})
         path='/index.html' if parsed.path=='/' else parsed.path; target=(WEB/path.lstrip('/')).resolve()
         if WEB.resolve() not in target.parents or not target.is_file(): self.send_error(404); return
