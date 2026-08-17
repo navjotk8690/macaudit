@@ -3,7 +3,7 @@ set -u
 PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin
 umask 077
 
-VERSION="3.3.3"
+VERSION="3.4.18"
 BASE="/Library/Application Support/MacAudit"
 LOG_DIR="/Library/Logs/MacAudit"
 CONF="$BASE/macaudit.conf"
@@ -18,7 +18,15 @@ NOTIFY_STATE="$STATE/notifications"
 RETENTION_DAYS=90 ENABLE_NOTIFICATIONS=1 NOTIFY_MIN_SEVERITY=HIGH
 NOTIFICATION_COOLDOWN_SECONDS=900 ENABLE_UNIFIED_LOG_SCAN=1 ENABLE_TCC_SCAN=1
 ENABLE_JUMPCLOUD_SCAN=1 DASHBOARD_ENABLED=1 DASHBOARD_PORT=8765
-FAST_INTERVAL_SECONDS=60 STANDARD_INTERVAL_SECONDS=300 SLOW_INTERVAL_SECONDS=1800
+FAST_INTERVAL_SECONDS=60 STANDARD_INTERVAL_SECONDS=300 SLOW_INTERVAL_SECONDS=1800 DATA_MOVEMENT_INTERVAL_SECONDS=300
+ENABLE_DATA_MOVEMENT_SCAN=1 DATA_MOVEMENT_MIN_FILE_MB=1 DATA_MOVEMENT_LOOKBACK_MINUTES=10
+DATA_MOVEMENT_TRACK_MIN_BYTES=0 DATA_MOVEMENT_MAX_DROP_PERCENT=35
+DATA_MOVEMENT_RECORD_FILENAMES=1 DATA_MOVEMENT_WATCH_HOME=1 DATA_MOVEMENT_WATCH_FOLDERS="Desktop,Documents,Downloads"
+DATA_MOVEMENT_EXCLUDE_DIRS="Library,.Trash,node_modules,.git,.venv,venv,__pycache__,.pyenv,.cache,.npm,.local,.cargo,.rustup,.gradle,DerivedData,build,dist,.TemporaryItems,.Spotlight-V100,.fseventsd"
+DATA_MOVEMENT_BUILTIN_EXCLUDE_DIRS="Library,.Trash,node_modules,.git,.venv,venv,__pycache__,.pyenv,.cache,.npm,.local,.cargo,.rustup,.gradle,DerivedData,build,dist,.TemporaryItems,.Spotlight-V100,.fseventsd"
+PERSISTENCE_METADATA_COOLDOWN_SECONDS=21600 PERSISTENCE_CHANGE_COOLDOWN_SECONDS=21600
+ENABLE_DATA_MOVEMENT_WATCHER=1 DATA_MOVEMENT_INVENTORY_WARNING_COOLDOWN_SECONDS=21600 DATA_MOVEMENT_WATCH_ALL_USERS=0 DATA_MOVEMENT_MAX_RECONCILE_CHANGES=200
+PRESENCE_AWAY_SECONDS=600 ENABLE_SOFTWARE_DOWNLOAD_SCAN=1
 
 now_iso(){ date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 json_escape(){ /usr/bin/perl -0777 -pe 's/\\/\\\\/g; s/"/\\"/g; s/\r/\\r/g; s/\n/\\n/g; s/\t/\\t/g'; }
@@ -52,11 +60,23 @@ load_config(){
     [[ -z "$key" || "$key" == \#* ]] && continue
     case "$key" in
       RETENTION_DAYS) valid_int "$value" 1 3650 && RETENTION_DAYS="$value";;
-      ENABLE_NOTIFICATIONS|ENABLE_UNIFIED_LOG_SCAN|ENABLE_TCC_SCAN|ENABLE_JUMPCLOUD_SCAN|DASHBOARD_ENABLED) [[ "$value" == 0 || "$value" == 1 ]] && printf -v "$key" '%s' "$value";;
+      ENABLE_NOTIFICATIONS|ENABLE_UNIFIED_LOG_SCAN|ENABLE_TCC_SCAN|ENABLE_JUMPCLOUD_SCAN|ENABLE_DATA_MOVEMENT_SCAN|ENABLE_DATA_MOVEMENT_WATCHER|ENABLE_SOFTWARE_DOWNLOAD_SCAN|DATA_MOVEMENT_RECORD_FILENAMES|DATA_MOVEMENT_WATCH_HOME|DATA_MOVEMENT_WATCH_ALL_USERS|DASHBOARD_ENABLED) [[ "$value" == 0 || "$value" == 1 ]] && printf -v "$key" '%s' "$value";;
       NOTIFY_MIN_SEVERITY) [[ "$value" =~ ^(INFO|LOW|MEDIUM|HIGH|CRITICAL)$ ]] && NOTIFY_MIN_SEVERITY="$value";;
       NOTIFICATION_COOLDOWN_SECONDS) valid_int "$value" 0 86400 && NOTIFICATION_COOLDOWN_SECONDS="$value";;
       DASHBOARD_PORT) valid_int "$value" 1024 65535 && DASHBOARD_PORT="$value";;
-      FAST_INTERVAL_SECONDS|STANDARD_INTERVAL_SECONDS|SLOW_INTERVAL_SECONDS) valid_int "$value" 30 86400 && printf -v "$key" '%s' "$value";;
+      FAST_INTERVAL_SECONDS|STANDARD_INTERVAL_SECONDS|SLOW_INTERVAL_SECONDS|DATA_MOVEMENT_INTERVAL_SECONDS) valid_int "$value" 30 86400 && printf -v "$key" '%s' "$value";;
+      DATA_MOVEMENT_MIN_FILE_MB) valid_int "$value" 1 102400 && DATA_MOVEMENT_MIN_FILE_MB="$value";;
+      DATA_MOVEMENT_TRACK_MIN_BYTES) valid_int "$value" 0 104857600 && DATA_MOVEMENT_TRACK_MIN_BYTES="$value";;
+      DATA_MOVEMENT_MAX_DROP_PERCENT) valid_int "$value" 5 95 && DATA_MOVEMENT_MAX_DROP_PERCENT="$value";;
+      DATA_MOVEMENT_MAX_RECONCILE_CHANGES) valid_int "$value" 10 10000 && DATA_MOVEMENT_MAX_RECONCILE_CHANGES="$value";;
+      DATA_MOVEMENT_LOOKBACK_MINUTES) valid_int "$value" 1 1440 && DATA_MOVEMENT_LOOKBACK_MINUTES="$value";;
+      PERSISTENCE_METADATA_COOLDOWN_SECONDS) valid_int "$value" 0 604800 && PERSISTENCE_METADATA_COOLDOWN_SECONDS="$value";;
+      PERSISTENCE_CHANGE_COOLDOWN_SECONDS) valid_int "$value" 0 604800 && PERSISTENCE_CHANGE_COOLDOWN_SECONDS="$value";;
+      PRESENCE_AWAY_SECONDS) valid_int "$value" 60 86400 && PRESENCE_AWAY_SECONDS="$value";;
+      DATA_MOVEMENT_INVENTORY_WARNING_COOLDOWN_SECONDS) valid_int "$value" 0 604800 && DATA_MOVEMENT_INVENTORY_WARNING_COOLDOWN_SECONDS="$value";;
+      DATA_MOVEMENT_WATCH_FOLDERS) [[ "$value" =~ ^[A-Za-z0-9,._-]+$ ]] && DATA_MOVEMENT_WATCH_FOLDERS="$value";;
+      DATA_MOVEMENT_EXCLUDE_DIRS) [[ "$value" =~ ^[A-Za-z0-9,._-]+$ ]] && DATA_MOVEMENT_EXCLUDE_DIRS="$value";;
+      REMOTE_SESSION_REGEX) : ;; # accepted for backward compatibility with pre-3.4 configs
       *) log "Ignored unknown configuration key: $key";;
     esac
   done < "$CONF"
@@ -65,14 +85,29 @@ load_config(){
 require_root(){ [ "$(id -u)" -eq 0 ] || { echo "MacAudit must run as root. Use sudo." >&2; exit 1; }; }
 setup(){ mkdir -p "$STATE" "$SNAP" "$LOG_DIR" "$NOTIFY_STATE"; chmod 700 "$BASE" "$STATE" "$SNAP" "$NOTIFY_STATE" 2>/dev/null || true; chmod 750 "$LOG_DIR" 2>/dev/null || true; touch "$EVENTS" "$DASH_EVENTS"; chmod 600 "$EVENTS" "$DASH_EVENTS" 2>/dev/null || true; load_config; }
 
+pid_is_macaudit_scan(){
+  local pid="$1" command=""
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  case "$command" in
+    *"/usr/local/libexec/macaudit run"*|*"/bin/macaudit run"*) return 0;;
+    *) return 1;;
+  esac
+}
+
 acquire_lock(){
   if mkdir "$LOCK" 2>/dev/null; then
     printf '%s\n' "$$" > "$LOCK/pid"; printf '%s\n' "$(date +%s)" > "$LOCK/started"; trap 'rm -rf "$LOCK"' EXIT INT TERM; return 0
   fi
   local pid=""; [ -r "$LOCK/pid" ] && pid="$(cat "$LOCK/pid" 2>/dev/null || true)"
-  if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then log "Scan skipped: process $pid still owns the lock"; exit 0; fi
-  rm -rf "$LOCK"; log "Recovered stale scan lock"
-  mkdir "$LOCK" || exit 1; printf '%s\n' "$$" > "$LOCK/pid"; printf '%s\n' "$(date +%s)" > "$LOCK/started"; trap 'rm -rf "$LOCK"' EXIT INT TERM
+  if pid_is_macaudit_scan "$pid"; then
+    log "Scan skipped: MacAudit process $pid still owns the lock"
+    return 75
+  fi
+  rm -rf "$LOCK"; log "Recovered stale scan lock${pid:+ previously owned by PID $pid}"
+  mkdir "$LOCK" || return 1
+  printf '%s\n' "$$" > "$LOCK/pid"; printf '%s\n' "$(date +%s)" > "$LOCK/started"; trap 'rm -rf "$LOCK"' EXIT INT TERM
 }
 
 notify_user(){
@@ -95,7 +130,12 @@ friendly_fields(){
     remote-sockets) echo 'A remote-support app is communicating online|A remote-support process has an active non-local network connection.|Many support tools stay connected to their service while idle, so this does not prove someone is controlling the Mac.|Check whether the app is approved and whether a support session is expected.';;
     privacy-permissions) echo 'Privacy permissions changed|An app gained, lost, or changed access to protected Mac features such as screen recording, accessibility, camera, microphone, or files.|Expected after approving a trusted app or after a software update.|Review System Settings > Privacy & Security and remove access you do not recognise.';;
     identity) echo 'A user or administrator account changed|The list of local users or administrators is different from the previous scan.|Expected when IT creates or removes an approved account.|Review the account name. Unexpected administrator access should be investigated immediately.';;
-    persistence) echo 'An automatic-start item changed|A LaunchAgent, LaunchDaemon, scheduled task, or similar startup item was added, removed, or modified.|Expected after installing or updating trusted software.|Check the changed path and publisher. Remove unknown items only after confirming they are not required.';;
+    persistence) echo 'An automatic-start item changed|A LaunchAgent, LaunchDaemon, scheduled task, or similar startup item was added, removed, or had its effective startup behaviour modified.|Expected after installing or updating trusted software.|Check the changed path and publisher. Metadata-only rewrites are recorded separately as informational events.';;
+    persistence-metadata) echo 'Startup item metadata was rewritten|A startup plist changed on disk, but MacAudit did not detect a change to the fields that control what starts, when it starts, or which user it runs as.|Common during normal application updates and self-maintenance.|No immediate action is required if you recognise the software. The raw hashes and path remain available for review.';;
+    data-movement) echo 'Local data movement evidence detected|MacAudit observed a local file, folder, external-volume write, archive, transfer-tool process, deletion, rename, or move relevant to data movement monitoring.|Expected when you create, move, rename, copy, archive, upload, back up, or delete your own files.|Review the filename, destination, process, timing and whether you were at the Mac. This is evidence of activity, not automatic proof of data exfiltration.';;
+    software-download) echo 'Software download detected|A disk image, installer package, application bundle, or likely software archive appeared in a user download location.|Expected when you intentionally download or copy software.|Confirm the filename, source process, quarantine metadata, and whether a later installation or startup item appeared.';;
+    data-movement-health) echo 'Filesystem reconciliation was not trusted|MacAudit rejected a periodic filesystem inventory because it could not prove that the apparent changes represented real file or folder removals. The previous good baseline was kept.|This can happen when macOS temporarily prevents part of the home directory from being enumerated or a scan is interrupted.|No mass deletion is being claimed. Review Technical Details only if this warning continues repeatedly.';;
+    data-transfer) echo 'File-transfer tool activity detected|A command-line tool commonly used to copy or transfer files is running.|Expected when you intentionally use scp, sftp, rsync, rclone or a similar utility.|Review the command and destination. Network encryption may prevent MacAudit from proving which file contents were transferred.';;
     security-settings) echo 'A security setting changed|A core macOS protection or remote-access setting differs from the previous scan.|Expected when you or IT intentionally change security or sharing settings.|Review FileVault, firewall, Gatekeeper, SIP, Remote Login, and Remote Apple Events.';;
     device-management) echo 'Device management changed|MDM enrolment or a system extension changed.|Expected on a company-managed Mac or after approved security software changes.|Confirm the organisation and extension are trusted.';;
     software) echo 'Installed software changed|An application or installer package was added or removed.|Expected when installing, updating, or uninstalling software.|Review unfamiliar applications and packages.';;
@@ -110,7 +150,9 @@ baseline_fields(){
   case "$1" in
     privacy-permissions) echo 'Privacy permissions baseline created|MacAudit recorded the current privacy permissions as the starting point for future comparisons.|Expected on first install, after an upgrade that rebuilds this collector, or after a manual baseline reset.|No action is required. Future scans will report permission changes relative to this baseline.';;
     software) echo 'Installed software baseline created|MacAudit recorded the currently installed applications and installer packages as the starting point for future comparisons.|Expected on first install, after an upgrade that rebuilds this collector, or after a manual baseline reset.|No action is required. Future scans will report software added or removed relative to this baseline.';;
-    persistence) echo 'Startup items baseline created|MacAudit recorded the current LaunchAgents, LaunchDaemons and scheduled startup items as the starting point for future comparisons.|Expected on first install, after an upgrade that rebuilds this collector, or after a manual baseline reset.|No action is required. Future scans will report startup items added, removed or modified relative to this baseline.';;
+    software-download) echo 'Software download baseline created|MacAudit recorded software-like files currently present in common download locations as a starting point for future comparisons.|Expected after enabling software-download monitoring or upgrading this collector.|No action is required. Future scans can report new disk images, installer packages, app bundles and likely software archives.';;
+    persistence) echo 'Startup items baseline created|MacAudit recorded the effective startup behaviour and file hashes of current LaunchAgents, LaunchDaemons and scheduled jobs as the starting point for future comparisons.|Expected on first install, after an upgrade that rebuilds this collector, or after a manual baseline reset.|No action is required. Future scans distinguish meaningful startup changes from metadata-only plist rewrites.';;
+    data-movement) echo 'Data movement baseline created|MacAudit recorded the current files in configured user folders so it can notice later removals and correlate them with transfer activity.|Expected on first install, after enabling data movement monitoring, or after a manual baseline reset.|No action is required. Filename-level evidence stays local under MacAudit state and logs.';;
     security-settings) echo 'Mac security baseline created|MacAudit recorded the current SIP, Gatekeeper, FileVault and firewall settings as the starting point for future comparisons.|Expected on first install, after an upgrade that rebuilds this collector, or after a manual baseline reset.|No action is required. Future scans will report security setting changes relative to this baseline.';;
     identity) echo 'User and administrator baseline created|MacAudit recorded the current local users and administrators as the starting point for future comparisons.|Expected on first install, after an upgrade that rebuilds this collector, or after a manual baseline reset.|No action is required. Future scans will report account and administrator changes relative to this baseline.';;
     remote-access) echo 'Remote access settings baseline created|MacAudit recorded Remote Login, Screen Sharing, Apple Remote Desktop and Remote Apple Events as the starting point for future comparisons.|Expected on first install, after an upgrade that rebuilds this collector, or after a manual baseline reset.|No action is required. Future scans will report remote-access setting changes relative to this baseline.';;
@@ -120,18 +162,63 @@ baseline_fields(){
   esac
 }
 
+user_presence(){
+  local user idle_ns="" idle=-1 locked=0 display_on=1 state="UNKNOWN" python_bin="" session_info=""
+  user="$(stat -f '%Su' /dev/console 2>/dev/null || true)"
+  if [ -z "$user" ] || [ "$user" = root ] || [ "$user" = loginwindow ]; then
+    printf 'LOGGED_OUT|0|%s\n' "${user:-none}"; return
+  fi
+  for python_bin in /usr/bin/python3 /opt/homebrew/bin/python3 /usr/local/bin/python3; do [ -x "$python_bin" ] && break; done
+  if [ -x "$python_bin" ]; then
+    session_info="$(ioreg -n Root -d1 -a 2>/dev/null | "$python_bin" -c 'import plistlib,sys; u=sys.argv[1];
+try: d=plistlib.load(sys.stdin.buffer); users=(d[0] if d else {}).get("IOConsoleUsers",[])
+except Exception: users=[]
+for x in users:
+ if str(x.get("kCGSSessionUserNameKey",x.get("CGSSessionUserNameKey","")))==u:
+  print("1" if x.get("CGSSessionScreenIsLocked") else "0"); break
+else: print("")' "$user" 2>/dev/null || true)"
+    [ "$session_info" = 1 ] && locked=1
+  fi
+  idle_ns="$(ioreg -c IOHIDSystem -r -d 1 2>/dev/null | awk -F'= ' '/HIDIdleTime/ {gsub(/[^0-9]/,"",$2); print $2; exit}')"
+  [[ "$idle_ns" =~ ^[0-9]+$ ]] && idle=$((idle_ns/1000000000))
+  if ioreg -r -n IODisplayWrangler -d 1 2>/dev/null | grep -Eq '"CurrentPowerState" = [0-3]'; then display_on=0; fi
+  if [ "$locked" -eq 1 ]; then state="LOCKED"
+  elif [ "$display_on" -eq 0 ]; then state="AWAY"
+  elif [ "$idle" -lt 0 ]; then state="UNKNOWN"
+  elif [ "$idle" -ge "$PRESENCE_AWAY_SECONDS" ]; then state="AWAY"
+  else state="ACTIVE"; fi
+  [ "$idle" -lt 0 ] && idle=0
+  printf '%s|%s|%s\n' "$state" "$idle" "$user"
+}
+
+presence_description(){
+  case "$1" in
+    ACTIVE) echo 'User active at the Mac';;
+    AWAY) echo 'User away / idle';;
+    LOCKED) echo 'Screen locked';;
+    LOGGED_OUT) echo 'No logged-in console user';;
+    UNKNOWN) echo 'User presence could not be determined';;
+    *) echo 'User presence unknown';;
+  esac
+}
+
 emit(){
   local severity="$1" category="$2" message="$3" evidence="${4:-}" key="${5:-$2|$3}" state="${6:-changed}"
-  local fp hash oldfile old ts host user fields title why normal action
+  local fp hash oldfile old ts host user fields title why normal action presence presence_state idle_seconds presence_user presence_label
   fp="$(printf '%s' "$key" | shasum -a 256 | awk '{print $1}')"; oldfile="$STATE/event-$fp.hash"
   hash="$(printf '%s\n%s\n%s' "$message" "$evidence" "$state" | shasum -a 256 | awk '{print $1}')"; old="$(cat "$oldfile" 2>/dev/null || true)"
   [ "$hash" = "$old" ] && return 0; printf '%s' "$hash" > "$oldfile"
   ts="$(now_iso)"; host="$(scutil --get ComputerName 2>/dev/null || hostname)"; user="$(stat -f '%Su' /dev/console 2>/dev/null || echo unknown)"
+  presence="$(user_presence)"; IFS='|' read -r presence_state idle_seconds presence_user <<< "$presence"; presence_label="$(presence_description "$presence_state")"
+  case "$category:$presence_state" in
+    active-ssh:AWAY|active-ssh:LOCKED|active-ssh:LOGGED_OUT|remote-sockets:AWAY|remote-sockets:LOCKED|remote-sockets:LOGGED_OUT|remote-software:AWAY|remote-software:LOCKED|remote-software:LOGGED_OUT)
+      message="$message — occurred while user was not actively at the Mac";;
+  esac
   if [ "$state" = baseline ]; then fields="$(baseline_fields "$category")"; else fields="$(friendly_fields "$category")"; fi
   IFS='|' read -r title why normal action <<< "$fields"
   evidence="$(printf '%s' "$evidence" | head -c 12000)"
-  printf '{"timestamp":"%s","severity":"%s","category":"%s","state":"%s","host":"%s","console_user":"%s","message":"%s","evidence":"%s"}\n' "$ts" "$severity" "$category" "$state" "$(printf '%s' "$host"|json_escape)" "$(printf '%s' "$user"|json_escape)" "$(printf '%s' "$message"|json_escape)" "$(printf '%s' "$evidence"|json_escape)" >> "$EVENTS"
-  printf '{"timestamp":"%s","severity":"%s","category":"%s","state":"%s","title":"%s","summary":"%s","normal_when":"%s","recommended_action":"%s","message":"%s","evidence":"%s"}\n' "$ts" "$severity" "$category" "$state" "$(printf '%s' "$title"|json_escape)" "$(printf '%s' "$why"|json_escape)" "$(printf '%s' "$normal"|json_escape)" "$(printf '%s' "$action"|json_escape)" "$(printf '%s' "$message"|json_escape)" "$(printf '%s' "$evidence"|json_escape)" >> "$DASH_EVENTS"
+  printf '{"timestamp":"%s","severity":"%s","category":"%s","state":"%s","host":"%s","console_user":"%s","presence_state":"%s","idle_seconds":%s,"presence_label":"%s","message":"%s","evidence":"%s"}\n' "$ts" "$severity" "$category" "$state" "$(printf '%s' "$host"|json_escape)" "$(printf '%s' "$user"|json_escape)" "$presence_state" "${idle_seconds:-0}" "$(printf '%s' "$presence_label"|json_escape)" "$(printf '%s' "$message"|json_escape)" "$(printf '%s' "$evidence"|json_escape)" >> "$EVENTS"
+  printf '{"timestamp":"%s","severity":"%s","category":"%s","state":"%s","presence_state":"%s","idle_seconds":%s,"presence_label":"%s","title":"%s","summary":"%s","normal_when":"%s","recommended_action":"%s","message":"%s","evidence":"%s"}\n' "$ts" "$severity" "$category" "$state" "$presence_state" "${idle_seconds:-0}" "$(printf '%s' "$presence_label"|json_escape)" "$(printf '%s' "$title"|json_escape)" "$(printf '%s' "$why"|json_escape)" "$(printf '%s' "$normal"|json_escape)" "$(printf '%s' "$action"|json_escape)" "$(printf '%s' "$message"|json_escape)" "$(printf '%s' "$evidence"|json_escape)" >> "$DASH_EVENTS"
   log "[$severity] $category: $message"; notify_user "$severity" "$category" "$message" "$fp"
 }
 
@@ -190,6 +277,8 @@ if name == 'installed_software':
     if pkg_add: bits.append(f"{len(pkg_add)} installer {plural(len(pkg_add),'package')} added")
     if pkg_del: bits.append(f"{len(pkg_del)} installer {plural(len(pkg_del),'package')} removed")
     print('Installed software changed: ' + ', '.join(bits) if bits else 'Installed software inventory changed')
+elif name == 'software_downloads':
+    print(f'Software download inventory changed: {len(added)} new, {len(removed)} removed')
 elif name == 'automatic_start_items':
     om,nm=hash_map(old),hash_map(new); op,np=set(om),set(nm)
     a=np-op; r=op-np; modified={x for x in op&np if om[x]!=nm[x]}
@@ -278,6 +367,1008 @@ snapshot_diff(){
   fi
 }
 
+persistence_inventory(){
+  local semantic_out="$1" full_out="$2" details_out="$3" python_bin=""
+  for python_bin in /usr/bin/python3 /opt/homebrew/bin/python3 /usr/local/bin/python3; do [ -x "$python_bin" ] && break; done
+  [ -x "$python_bin" ] || return 1
+  "$python_bin" - "$semantic_out" "$full_out" "$details_out" <<'PYPERSIST'
+import hashlib, json, plistlib, sys
+from pathlib import Path
+semantic_out, full_out, details_out = map(Path, sys.argv[1:])
+roots=[Path('/Library/LaunchDaemons'),Path('/Library/LaunchAgents')]
+users=Path('/Users')
+if users.is_dir():
+    for user in users.iterdir(): roots.append(user/'Library/LaunchAgents')
+semantic_keys=('Label','Program','ProgramArguments','RunAtLoad','KeepAlive','UserName','GroupName','StartInterval','StartCalendarInterval','WatchPaths','QueueDirectories','Sockets','MachServices','Disabled','RootDirectory','WorkingDirectory')
+def digest(data): return hashlib.sha256(data).hexdigest()
+def normalise(obj):
+    if isinstance(obj, bytes): return obj.hex()
+    if isinstance(obj, dict): return {str(k):normalise(v) for k,v in obj.items()}
+    if isinstance(obj, (list,tuple)): return [normalise(v) for v in obj]
+    if isinstance(obj, (str,int,float,bool)) or obj is None: return obj
+    return str(obj)
+def canonical(obj): return json.dumps(normalise(obj),sort_keys=True,separators=(',',':')).encode()
+sem=[]; full=[]; details={}
+for root in roots:
+    if not root.is_dir(): continue
+    for path in sorted(root.glob('*.plist')):
+        try: raw=path.read_bytes()
+        except OSError: continue
+        full_hash=digest(raw)
+        try:
+            pl=plistlib.loads(raw); relevant={k:normalise(pl[k]) for k in semantic_keys if k in pl}; sem_hash=digest(canonical(relevant)); details[str(path)]=relevant
+        except Exception:
+            sem_hash=full_hash; details[str(path)]={'_unparsed_file_hash':full_hash}
+        sem.append(f'{sem_hash}  {path}'); full.append(f'{full_hash}  {path}')
+periodic=Path('/etc/periodic')
+if periodic.is_dir():
+    for path in sorted(p for p in periodic.rglob('*') if p.is_file()):
+        try: raw=path.read_bytes()
+        except OSError: continue
+        h=digest(raw); sem.append(f'{h}  {path}'); full.append(f'{h}  {path}'); details[str(path)]={'_file_hash':h}
+semantic_out.write_text('\n'.join(sorted(sem))+('\n' if sem else ''))
+full_out.write_text('\n'.join(sorted(full))+('\n' if full else ''))
+details_out.write_text(json.dumps(details,sort_keys=True,separators=(',',':'))+'\n')
+PYPERSIST
+}
+
+collect_persistence(){
+  local sem full details oldsem oldfull olddetails work python_bin=""
+  sem="$(mktemp)"; full="$(mktemp)"; details="$(mktemp)"; work="$(mktemp -d)"
+  oldsem="$SNAP/automatic_start_items.current"; oldfull="$SNAP/automatic_start_item_files.current"; olddetails="$SNAP/automatic_start_item_details.current"
+  if ! persistence_inventory "$sem" "$full" "$details"; then rm -f "$sem" "$full" "$details"; rm -rf "$work"; return 1; fi
+  if [ ! -f "$oldsem" ] || [ ! -f "$oldfull" ] || [ ! -f "$olddetails" ]; then
+    cp "$sem" "$oldsem"; cp "$full" "$oldfull"; cp "$details" "$olddetails"
+    emit INFO persistence "Startup items baseline created" "" "baseline:automatic_start_items" baseline
+    rm -f "$sem" "$full" "$details"; rm -rf "$work"; return 0
+  fi
+  for python_bin in /usr/bin/python3 /opt/homebrew/bin/python3 /usr/local/bin/python3; do [ -x "$python_bin" ] && break; done
+  "$python_bin" - "$oldsem" "$sem" "$oldfull" "$full" "$olddetails" "$details" "$work" <<'PYPDIFF'
+import json,sys
+from pathlib import Path
+oldsem,newsem,oldfull,newfull,olddetails,newdetails,outdir=map(Path,sys.argv[1:])
+def maps(path):
+    out={}
+    for line in path.read_text(errors='replace').splitlines():
+        parts=line.split(None,1)
+        if len(parts)==2: out[parts[1]]=parts[0]
+    return out
+def loadj(path):
+    try:return json.loads(path.read_text())
+    except Exception:return {}
+def short(v):
+    text=json.dumps(v,sort_keys=True,separators=(',',':')) if not isinstance(v,str) else v
+    return text if len(text)<=500 else text[:497]+'...'
+os,ns,of,nf=maps(oldsem),maps(newsem),maps(oldfull),maps(newfull); od,nd=loadj(olddetails),loadj(newdetails)
+oldp,newp=set(os),set(ns); added=sorted(newp-oldp); removed=sorted(oldp-newp); semantic=sorted(p for p in oldp&newp if os[p]!=ns[p]); metadata=sorted(p for p in oldp&newp if of.get(p)!=nf.get(p) and p not in semantic)
+changes={}
+for p in semantic:
+    before,after=od.get(p,{}),nd.get(p,{}); fields=[]
+    for k in sorted(set(before)|set(after)):
+        if before.get(k)!=after.get(k): fields.append((k,before.get(k,'<missing>'),after.get(k,'<missing>')))
+    changes[p]=fields
+def write(kind,msg,lines,signature=''):
+    if not lines:return
+    (outdir/f'{kind}.msg').write_text(msg); (outdir/f'{kind}.evidence').write_text('\n'.join(lines)+'\n')
+    if signature:(outdir/f'{kind}.signature').write_text(signature)
+b=[]
+if added:b.append(f"{len(added)} startup item{'s' if len(added)!=1 else ''} added")
+if removed:b.append(f"{len(removed)} startup item{'s' if len(removed)!=1 else ''} removed")
+if semantic:b.append(f"{len(semantic)} startup item{'s' if len(semantic)!=1 else ''} changed behaviour")
+lines=[]; sigparts=[]
+for p in added: lines.append(f'ADDED: {p}'); sigparts.append('ADD:'+p)
+for p in removed: lines.append(f'REMOVED: {p}'); sigparts.append('REMOVE:'+p)
+for p in semantic:
+    fields=changes.get(p,[]); names=','.join(k for k,_,_ in fields) or 'semantic-content'; sigparts.append('CHANGE:'+p+':'+names); lines.append(f'BEHAVIOUR CHANGED: {p}\n  changed fields: {names}')
+    for k,before,after in fields: lines.append(f'  {k}:\n    old: {short(before)}\n    new: {short(after)}')
+write('high','Startup items changed: '+', '.join(b),lines,'|'.join(sigparts))
+if metadata:
+    lines=[f'METADATA-ONLY REWRITE: {p}\n  old file hash: {of.get(p,"unknown")}\n  new file hash: {nf.get(p,"unknown")}' for p in metadata]; write('info',f"Startup item metadata rewritten: {len(metadata)} file{'s' if len(metadata)!=1 else ''}; effective startup behaviour unchanged",lines)
+PYPDIFF
+  if [ -s "$work/high.msg" ]; then
+    local sig sig_hash stamp now last=0
+    sig="$(cat "$work/high.signature" 2>/dev/null || cat "$work/high.msg")"; sig_hash="$(printf '%s' "$sig" | shasum -a 256 | awk '{print $1}')"; stamp="$STATE/persistence-change-$sig_hash.last"; now="$(date +%s)"; [ -f "$stamp" ] && last="$(cat "$stamp" 2>/dev/null || echo 0)"
+    if [ $((now-last)) -ge "$PERSISTENCE_CHANGE_COOLDOWN_SECONDS" ]; then
+      emit HIGH persistence "$(cat "$work/high.msg")" "$(cat "$work/high.evidence")" "change:automatic_start_items:$sig_hash" changed; printf '%s' "$now" > "$stamp"
+    else log "Suppressed repeated startup-item behaviour change within cooldown: $(cat "$work/high.msg")"; fi
+  fi
+  if [ -s "$work/info.msg" ]; then
+    local metadata_stamp="$STATE/persistence-metadata-last" metadata_now metadata_last=0
+    metadata_now="$(date +%s)"; [ -f "$metadata_stamp" ] && metadata_last="$(cat "$metadata_stamp" 2>/dev/null || echo 0)"
+    if [ $((metadata_now-metadata_last)) -ge "$PERSISTENCE_METADATA_COOLDOWN_SECONDS" ]; then emit INFO persistence-metadata "$(cat "$work/info.msg")" "$(cat "$work/info.evidence")" "metadata:automatic_start_items" changed; printf '%s' "$metadata_now" > "$metadata_stamp"; else log "Suppressed metadata-only startup-item rewrite within cooldown: $(cat "$work/info.msg")"; fi
+  fi
+  cp "$sem" "$oldsem"; cp "$full" "$oldfull"; cp "$details" "$olddetails"; rm -f "$sem" "$full" "$details"; rm -rf "$work"
+}
+
+data_movement_homes(){
+  local home console_user console_home uid
+  if [ "$DATA_MOVEMENT_WATCH_ALL_USERS" = 1 ]; then
+    for home in /Users/*; do
+      [ -d "$home" ] || continue
+      case "$(basename "$home")" in Shared|Guest) continue;; esac
+      printf '%s\n' "$home"
+    done
+    return 0
+  fi
+  console_user="$(stat -f '%Su' /dev/console 2>/dev/null || true)"
+  if [ -n "$console_user" ] && [ "$console_user" != root ] && [ "$console_user" != loginwindow ]; then
+    console_home="$(dscl . -read "/Users/$console_user" NFSHomeDirectory 2>/dev/null | sed 's/^NFSHomeDirectory:[[:space:]]*//' || true)"
+    [ -n "$console_home" ] && [ -d "$console_home" ] && { printf '%s\n' "$console_home"; return 0; }
+  fi
+  # Fallback for headless/early-boot scans: monitor normal local user homes only.
+  for home in /Users/*; do
+    [ -d "$home" ] || continue
+    case "$(basename "$home")" in Shared|Guest) continue;; esac
+    uid="$(dscl . -read "/Users/$(basename "$home")" UniqueID 2>/dev/null | awk '{print $2}' || true)"
+    [[ "$uid" =~ ^[0-9]+$ ]] && [ "$uid" -ge 500 ] && printf '%s\n' "$home"
+  done
+}
+
+data_movement_dirs(){
+  local home folder oldifs="$IFS"
+  if [ "$DATA_MOVEMENT_WATCH_HOME" = 1 ]; then
+    data_movement_homes
+    return 0
+  fi
+  IFS=','
+  while IFS= read -r home; do
+    for folder in $DATA_MOVEMENT_WATCH_FOLDERS; do
+      [ -d "$home/$folder" ] && printf '%s\n' "$home/$folder"
+    done
+  done < <(data_movement_homes)
+  IFS="$oldifs"
+}
+
+data_movement_inventory(){
+  local out="$1" meta="$2" track_min_bytes="$DATA_MOVEMENT_TRACK_MIN_BYTES" python_bin="" roots excludes
+  : > "$out"; : > "$meta"
+  for python_bin in /usr/bin/python3 /opt/homebrew/bin/python3 /usr/local/bin/python3; do [ -x "$python_bin" ] && break; done
+  [ -x "$python_bin" ] || { log "Data movement inventory skipped: Python 3 not found"; return 1; }
+  roots="$(data_movement_dirs)"
+  excludes="$DATA_MOVEMENT_EXCLUDE_DIRS,$DATA_MOVEMENT_BUILTIN_EXCLUDE_DIRS"
+  MACAUDIT_DM_ROOTS="$roots" "$python_bin" - "$out" "$meta" "$track_min_bytes" "$excludes" <<'PYINV'
+import os,sys
+from pathlib import Path
+out=Path(sys.argv[1]); meta=Path(sys.argv[2]); min_bytes=int(sys.argv[3]); excluded={x for x in sys.argv[4].split(',') if x}
+roots=[Path(x) for x in os.environ.get('MACAUDIT_DM_ROOTS','').splitlines() if x]
+lines=[]; errors=[]; root_stats=[]
+
+def walk_root(root):
+    before=len(lines); local_errors=[]
+    def onerror(exc):
+        local_errors.append(f'{getattr(exc,"filename","")}: {exc}')
+    try:
+        rst=root.stat()
+    except OSError as exc:
+        return 0,[f'{root}: {exc}']
+    # A root sentinel is part of the snapshot and lets reconciliation prove the
+    # monitored root itself was actually visible during this scan.
+    lines.append(f'R|{rst.st_dev}|{rst.st_ino}|0|{int(rst.st_mtime)}|{root}')
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False, onerror=onerror):
+        # macOS Photos libraries are package directories with very high internal
+        # churn. Treat each .photoslibrary as an opaque package instead of
+        # inventorying its private database/cache tree.
+        opaque_photo_dirs=[d for d in dirnames if d.endswith('.photoslibrary')]
+        for d in opaque_photo_dirs:
+            p=Path(dirpath)/d
+            try:
+                st=p.stat(); lines.append(f'D|{st.st_dev}|{st.st_ino}|0|{int(st.st_mtime)}|{p}')
+            except OSError as exc:
+                local_errors.append(f'{p}: {exc}')
+        dirnames[:] = [d for d in dirnames if d not in excluded and not d.endswith('.photoslibrary')]
+        base=Path(dirpath)
+        if base != root:
+            try:
+                st=base.stat(); lines.append(f'D|{st.st_dev}|{st.st_ino}|0|{int(st.st_mtime)}|{base}')
+            except OSError as exc: local_errors.append(f'{base}: {exc}')
+        for name in filenames:
+            if name in {'.DS_Store','.localized'} or name.startswith('._') or name.startswith('~$'):
+                continue
+            path=base/name
+            try:
+                if path.is_symlink(): continue
+                st=path.stat()
+            except OSError as exc:
+                local_errors.append(f'{path}: {exc}'); continue
+            if st.st_size < min_bytes: continue
+            lines.append(f'F|{st.st_dev}|{st.st_ino}|{st.st_size}|{int(st.st_mtime)}|{path}')
+    return len(lines)-before,local_errors
+
+for root in roots:
+    if not root.is_dir():
+        root_stats.append((str(root),0,1)); errors.append(f'{root}: root unavailable'); continue
+    count,errs=walk_root(root); root_stats.append((str(root),count,len(errs))); errors.extend(errs)
+unique=sorted(set(lines))
+out.write_text('\n'.join(unique)+('\n' if unique else ''),encoding='utf-8')
+meta_lines=[f'roots_requested={len(roots)}',f'roots_scanned={sum(1 for _,c,_ in root_stats if c>0)}',f'objects={len(unique)}',f'errors={len(errors)}']
+for root,count,errcount in root_stats:
+    meta_lines.append(f'root={root}|objects={count}|errors={errcount}')
+meta_lines.extend(f'error={e}' for e in errors[:25])
+meta.write_text('\n'.join(meta_lines)+'\n',encoding='utf-8')
+# Root visibility is mandatory. Per-file permission errors are tolerated, but an
+# absent root must never be interpreted as deletion of everything below it.
+raise SystemExit(0 if roots and all(c>0 for _,c,_ in root_stats) else 2)
+PYINV
+}
+
+datawatch_excluded(){
+  local path="$1" name base oldifs="$IFS"
+  base="$(basename "$path")"
+  case "$base" in .DS_Store|.localized|._*|~\$*|.dat.nosync*|.AU.*|.com.google.Chrome.*|*.crdownload|*.sqlite-wal|*.sqlite-shm) return 0;; esac
+  # Treat the contents of Photos library bundles as application-private churn.
+  # The bundle root itself is handled separately so genuine user moves/deletes
+  # of a .photoslibrary are still observable when Finder performs them.
+  case "$path" in */.codex/.tmp/*|*/Photos\ Library.photoslibrary/*|*.photoslibrary/*) return 0;; esac
+  IFS=','
+  for name in $DATA_MOVEMENT_EXCLUDE_DIRS,$DATA_MOVEMENT_BUILTIN_EXCLUDE_DIRS; do
+    case "$path" in */"$name"|*/"$name"/*) IFS="$oldifs"; return 0;; esac
+  done
+  IFS="$oldifs"
+  return 1
+}
+
+datawatch_record_recent(){
+  local kind="$1" source="$2" destination="${3:-}" now recent="$STATE/datawatch-recent.tsv" tmp
+  now="$(date +%s)"
+  printf '%s\t%s\t%s\t%s\n' "$now" "$kind" "$source" "$destination" >> "$recent"
+  chmod 600 "$recent" 2>/dev/null || true
+  # Keep only a small recent window so this state file cannot grow forever.
+  tmp="$recent.tmp.$$"
+  awk -F '\t' -v cutoff="$((now-1800))" '$1+0 >= cutoff' "$recent" > "$tmp" 2>/dev/null || true
+  mv "$tmp" "$recent" 2>/dev/null || true
+}
+
+snapshot_prior_path_for_current(){
+  local current="$1" dev ino
+  [ -e "$current" ] || return 1
+  [ -r "$SNAP/data_movement_files.current" ] || return 1
+  dev="$(stat -f '%d' "$current" 2>/dev/null || true)"; ino="$(stat -f '%i' "$current" 2>/dev/null || true)"
+  [[ "$dev" =~ ^[0-9]+$ && "$ino" =~ ^[0-9]+$ ]] || return 1
+  awk -F'|' -v d="$dev" -v i="$ino" -v cur="$current" '$2==d && $3==i {p=$6; for(n=7;n<=NF;n++)p=p"|"$n; if(p!=cur){print p; exit}}' "$SNAP/data_movement_files.current"
+}
+
+datawatch_identity_state(){ printf '%s\n' "$STATE/datawatch-identities.tsv"; }
+datawatch_identity_history(){ printf '%s\n' "$STATE/datawatch-identity-history.tsv"; }
+
+datawatch_identity_lock_acquire(){
+  local lock="$STATE/datawatch-identities.lock" i
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    mkdir "$lock" 2>/dev/null && return 0
+    sleep 0.02
+  done
+  return 1
+}
+
+datawatch_identity_lock_release(){ rmdir "$STATE/datawatch-identities.lock" 2>/dev/null || true; }
+
+datawatch_append_identity_history(){
+  local stamp="$1" dev="$2" ino="$3" kind="$4" path="$5" f
+  f="$(datawatch_identity_history)"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$stamp" "$dev" "$ino" "$kind" "$path" >> "$f"
+  chmod 600 "$f" 2>/dev/null || true
+}
+
+datawatch_prune_identities(){
+  local f h tmp now
+  f="$(datawatch_identity_state)"; h="$(datawatch_identity_history)"; now="$(date +%s)"
+  if [ -f "$f" ]; then
+    if datawatch_identity_lock_acquire; then
+      tmp="$(mktemp "$STATE/datawatch-identities.tmp.XXXXXX")"
+      awk -F '\t' -v cutoff="$((now-86400))" '$1+0 >= cutoff' "$f" > "$tmp" 2>/dev/null || true
+      mv "$tmp" "$f" 2>/dev/null || true
+      datawatch_identity_lock_release
+    fi
+  fi
+  if [ -f "$h" ]; then
+    tmp="$(mktemp "$STATE/datawatch-identity-history.tmp.XXXXXX")"
+    awk -F '\t' -v cutoff="$((now-86400))" '$1+0 >= cutoff' "$h" > "$tmp" 2>/dev/null || true
+    mv "$tmp" "$h" 2>/dev/null || true
+  fi
+}
+
+datawatch_current_identity(){
+  local path="$1" dev ino kind
+  [ -e "$path" ] || return 1
+  dev="$(stat -f '%d' "$path" 2>/dev/null || true)"; ino="$(stat -f '%i' "$path" 2>/dev/null || true)"
+  [[ "$dev" =~ ^[0-9]+$ && "$ino" =~ ^[0-9]+$ ]] || return 1
+  if [ -d "$path" ]; then kind=D; else kind=F; fi
+  printf '%s\t%s\t%s\n' "$dev" "$ino" "$kind"
+}
+
+datawatch_track_identity(){
+  local path="$1" f tmp now dev ino kind
+  [ -e "$path" ] || return 1
+  dev="$(stat -f '%d' "$path" 2>/dev/null || true)"; ino="$(stat -f '%i' "$path" 2>/dev/null || true)"
+  [[ "$dev" =~ ^[0-9]+$ && "$ino" =~ ^[0-9]+$ ]] || return 1
+  if [ -d "$path" ]; then kind=D; else kind=F; fi
+  f="$(datawatch_identity_state)"; now="$(date +%s)"
+  datawatch_append_identity_history "$now" "$dev" "$ino" "$kind" "$path"
+  if datawatch_identity_lock_acquire; then
+    tmp="$(mktemp "$STATE/datawatch-identities.tmp.XXXXXX")"
+    if [ -f "$f" ]; then
+      awk -F '\t' -v d="$dev" -v i="$ino" -v p="$path" '!(($2==d && $3==i) || $5==p)' "$f" > "$tmp" 2>/dev/null || true
+    else
+      : > "$tmp"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "$now" "$dev" "$ino" "$kind" "$path" >> "$tmp"
+    mv "$tmp" "$f"; chmod 600 "$f" 2>/dev/null || true
+    datawatch_identity_lock_release
+  fi
+  printf '%s\t%s\t%s\n' "$dev" "$ino" "$kind"
+}
+
+datawatch_identity_for_path(){
+  local path="$1" f line
+  f="$(datawatch_identity_state)"
+  if [ -r "$f" ]; then
+    line="$(awk -F '\t' -v p="$path" '$5==p {print $2"\t"$3"\t"$4; exit}' "$f" 2>/dev/null || true)"
+    [ -n "$line" ] && { printf '%s\n' "$line"; return 0; }
+  fi
+  [ -r "$SNAP/data_movement_files.current" ] || return 1
+  awk -F'|' -v p="$path" '$6==p {print $2"\t"$3"\t"$1; exit}' "$SNAP/data_movement_files.current" 2>/dev/null
+}
+
+datawatch_prior_path_for_identity(){
+  local dev="$1" ino="$2" current="$3" f h path
+  f="$(datawatch_identity_state)"
+  if [ -r "$f" ]; then
+    path="$(awk -F '\t' -v d="$dev" -v i="$ino" -v cur="$current" '$2==d && $3==i && $5!=cur {print $5; exit}' "$f" 2>/dev/null || true)"
+    [ -n "$path" ] && { printf '%s\n' "$path"; return 0; }
+  fi
+  h="$(datawatch_identity_history)"
+  if [ -r "$h" ]; then
+    path="$(awk -F '\t' -v d="$dev" -v i="$ino" -v cur="$current" '$2==d && $3==i && $5!=cur {p=$5} END{if(p) print p}' "$h" 2>/dev/null || true)"
+    [ -n "$path" ] && { printf '%s\n' "$path"; return 0; }
+  fi
+  [ -r "$SNAP/data_movement_files.current" ] || return 1
+  awk -F'|' -v d="$dev" -v i="$ino" -v cur="$current" '$2==d && $3==i {p=$6; for(n=7;n<=NF;n++)p=p"|"$n; if(p!=cur){print p; exit}}' "$SNAP/data_movement_files.current" 2>/dev/null
+}
+
+datawatch_find_path_for_identity(){
+  local dev="$1" ino="$2" oldpath="$3" roots excludes python_bin="" result=""
+  [[ "$dev" =~ ^[0-9]+$ && "$ino" =~ ^[0-9]+$ ]] || return 1
+  roots="$(data_movement_dirs)"; [ -n "$roots" ] || return 1
+  excludes="$DATA_MOVEMENT_EXCLUDE_DIRS,$DATA_MOVEMENT_BUILTIN_EXCLUDE_DIRS"
+  for python_bin in /usr/bin/python3 /opt/homebrew/bin/python3 /usr/local/bin/python3; do [ -x "$python_bin" ] && break; done
+  [ -x "$python_bin" ] || return 1
+  result="$(MACAUDIT_DM_ROOTS="$roots" "$python_bin" - "$dev" "$ino" "$oldpath" "$excludes" <<'PYFIND'
+import os,sys
+from pathlib import Path
+want_dev=int(sys.argv[1]); want_ino=int(sys.argv[2]); old=sys.argv[3]
+excluded={x for x in sys.argv[4].split(',') if x}
+roots=[Path(x) for x in os.environ.get('MACAUDIT_DM_ROOTS','').splitlines() if x]
+
+def matches(path):
+    try:
+        st=path.stat()
+        return st.st_dev==want_dev and st.st_ino==want_ino and str(path)!=old
+    except OSError:
+        return False
+
+# Cheap candidates first: same parent, common user folders, and Trash.
+oldp=Path(old)
+candidates=[]
+if oldp.parent.is_dir(): candidates.append(oldp.parent)
+for root in roots:
+    # Cmd+Delete usually preserves the basename. Try the exact Trash destination
+    # first; this does not require enumerating the whole Trash directory and is
+    # useful on macOS configurations where listing Trash is privacy-restricted.
+    exact_trash=root/'.Trash'/oldp.name
+    if matches(exact_trash): print(exact_trash); raise SystemExit(0)
+    for name in ('Desktop','Documents','Downloads','Projects','.Trash'):
+        p=root/name
+        if p.is_dir(): candidates.append(p)
+seen=set()
+for base in candidates:
+    key=str(base)
+    if key in seen: continue
+    seen.add(key)
+    try:
+        for child in base.iterdir():
+            if matches(child): print(child); raise SystemExit(0)
+    except OSError:
+        pass
+
+# Finder's fs_usage rename record often contains only the source path. Resolve
+# that source's stable device/inode identity against the current monitored tree.
+for root in roots:
+    for dirpath,dirnames,filenames in os.walk(root,topdown=True,followlinks=False):
+        dirnames[:] = [d for d in dirnames if d not in excluded and not d.endswith('.photoslibrary')]
+        base=Path(dirpath)
+        if matches(base): print(base); raise SystemExit(0)
+        for name in filenames:
+            if name in {'.DS_Store','.localized'} or name.startswith('._') or name.startswith('~$'):
+                continue
+            p=base/name
+            if matches(p): print(p); raise SystemExit(0)
+raise SystemExit(1)
+PYFIND
+)" || true
+  [ -n "$result" ] || return 1
+  printf '%s\n' "$result"
+}
+
+datawatch_forget_path(){
+  local path="$1" f tmp
+  f="$(datawatch_identity_state)"; [ -f "$f" ] || return 0
+  if datawatch_identity_lock_acquire; then
+    tmp="$(mktemp "$STATE/datawatch-identities.tmp.XXXXXX")"
+    awk -F '\t' -v p="$path" '$5!=p' "$f" > "$tmp" 2>/dev/null || true
+    mv "$tmp" "$f" 2>/dev/null || true
+    datawatch_identity_lock_release
+  fi
+}
+
+datawatch_trash_seen_state(){ printf '%s\n' "$STATE/datawatch-trash-seen.tsv"; }
+
+datawatch_trash_key(){
+  local path="$1" dev ino
+  [ -e "$path" ] || return 1
+  dev="$(stat -f '%d' "$path" 2>/dev/null || true)"; ino="$(stat -f '%i' "$path" 2>/dev/null || true)"
+  [[ "$dev" =~ ^[0-9]+$ && "$ino" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\t%s\t%s\n' "$dev" "$ino" "$path"
+}
+
+datawatch_baseline_trash_seen(){
+  local roots="$1" root trash destination key f tmp
+  f="$(datawatch_trash_seen_state)"; tmp="$(mktemp "$STATE/datawatch-trash-seen.tmp.XXXXXX")"
+  : > "$tmp"
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    trash="$root/.Trash"; [ -d "$trash" ] || continue
+    while IFS= read -r destination; do
+      [ -e "$destination" ] || continue
+      case "$(basename "$destination")" in .DS_Store|.localized|._*|~\$*) continue;; esac
+      key="$(datawatch_trash_key "$destination" 2>/dev/null || true)"
+      [ -n "$key" ] && printf '%s\n' "$key" >> "$tmp"
+    done < <(find "$trash" -mindepth 1 -maxdepth 1 -print 2>/dev/null)
+  done <<< "$roots"
+  sort -u "$tmp" > "$f" 2>/dev/null || mv "$tmp" "$f"
+  rm -f "$tmp" 2>/dev/null || true
+  chmod 600 "$f" 2>/dev/null || true
+}
+
+datawatch_scan_trash_moves_once(){
+  local roots="$1" root trash destination dev ino source now evidence f seen current tmp key
+  f="$(datawatch_trash_seen_state)"; seen="$(mktemp "$STATE/datawatch-trash-seen-read.tmp.XXXXXX")"
+  [ -r "$f" ] && cp "$f" "$seen" 2>/dev/null || : > "$seen"
+  current="$(mktemp "$STATE/datawatch-trash-current.tmp.XXXXXX")"; : > "$current"
+  now="$(date +%s)"
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    trash="$root/.Trash"; [ -d "$trash" ] || continue
+    while IFS= read -r destination; do
+      [ -e "$destination" ] || continue
+      case "$(basename "$destination")" in .DS_Store|.localized|._*|~\$*) continue;; esac
+      key="$(datawatch_trash_key "$destination" 2>/dev/null || true)"
+      [ -n "$key" ] || continue
+      printf '%s\n' "$key" >> "$current"
+      dev="${key%%$'\t'*}"; tmp="${key#*$'\t'}"; ino="${tmp%%$'\t'*}"
+      grep -Fqx "$key" "$seen" 2>/dev/null && continue
+
+      source="$(datawatch_prior_path_for_identity "$dev" "$ino" "$destination" 2>/dev/null || true)"
+      case "$source" in "$root/.Trash"|"$root/.Trash"/*) source="";; esac
+      if [ -n "$source" ] && { [ "$source" = "$root" ] || [[ "$source" == "$root/"* ]]; }; then
+        printf -v evidence 'FROM: %s\nTO: %s\nPROCESS: Finder/DesktopServicesHelper\nCORRELATION: new Trash entry matched the last known filesystem device/inode path' "$source" "$destination"
+        emit MEDIUM data-movement "Moved to Trash: $source -> $destination" "$evidence" "datawatch:trash-appearance:$source:$destination:$now" resolved
+        datawatch_record_recent trash "$source" "$destination"
+        datawatch_forget_path "$source"
+      else
+        printf -v evidence 'TRASH PATH: %s\nCORRELATION: a new top-level Trash entry appeared, but its source path could not be proven' "$destination"
+        emit INFO data-movement "Item appeared in Trash: $destination" "$evidence" "datawatch:trash-appearance-unresolved:$destination:$now" observed
+      fi
+      datawatch_track_identity "$destination" >/dev/null 2>&1 || true
+    done < <(find "$trash" -mindepth 1 -maxdepth 1 -print 2>/dev/null)
+  done <<< "$roots"
+  sort -u "$current" > "$f" 2>/dev/null || true
+  chmod 600 "$f" 2>/dev/null || true
+  rm -f "$seen" "$current" 2>/dev/null || true
+}
+
+datawatch_trash_poll_loop(){
+  local roots="$1"
+  datawatch_baseline_trash_seen "$roots"
+  while :; do
+    datawatch_scan_trash_moves_once "$roots" || true
+    sleep 1
+  done
+}
+
+software_download_kind(){
+  local path="$1" lower listing
+  lower="$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')"
+  case "$lower" in
+    *.dmg) echo 'Disk image';;
+    *.pkg|*.mpkg) echo 'Installer package';;
+    *.app) echo 'Application bundle';;
+    *.zip)
+      # ZIP is a generic archive format. Only call it software when the archive
+      # itself contains an application bundle or installer package. This avoids
+      # classifying ordinary document, source-code and backup ZIPs as software.
+      [ -f "$path" ] || return 1
+      if command -v unzip >/dev/null 2>&1; then
+        listing="$(unzip -Z1 "$path" 2>/dev/null | head -n 400 || true)"
+        printf '%s\n' "$listing" | grep -Eiq '(^|/)\.?[^/]+\.app(/|$)|(^|/)[^/]+\.(pkg|mpkg)(/|$)' || return 1
+        echo 'Software archive'
+      else
+        return 1
+      fi
+      ;;
+    *) return 1;;
+  esac
+}
+
+datawatch_is_nested_trash_path(){
+  local path="$1" root rel
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    case "$path" in
+      "$root/.Trash"/*)
+        rel="${path#"$root/.Trash/"}"
+        case "$rel" in */*) return 0;; esac
+        ;;
+    esac
+  done <<< "${2:-$(data_movement_dirs)}"
+  return 1
+}
+
+emit_software_download(){
+  local path="$1" proc="$2" raw="$3" kind quarantine="" evidence now known="$SNAP/software_downloads.current" tmp
+  [ "$ENABLE_SOFTWARE_DOWNLOAD_SCAN" = 1 ] || return 0
+  kind="$(software_download_kind "$path" 2>/dev/null || true)"; [ -n "$kind" ] || return 0
+  # Existing baseline entries are not new downloads merely because Finder,
+  # Spotlight, a browser, or another process touched/renamed them.
+  [ -f "$known" ] && grep -Fqx -- "$path" "$known" 2>/dev/null && return 0
+  quarantine="$(xattr -p com.apple.quarantine "$path" 2>/dev/null || true)"
+  now="$(date +%s)"
+  printf -v evidence 'PATH: %s\nTYPE: %s\nPROCESS: %s\nQUARANTINE: %s\n\nFILESYSTEM EVENT:\n%s' "$path" "$kind" "${proc%%.*}" "${quarantine:-not available}" "$raw"
+  emit INFO software-download "$kind detected: $path" "$evidence" "software-download:$path:$now" observed
+  # Record immediately so the periodic inventory cannot report the same file again.
+  if [ -f "$known" ]; then
+    tmp="$known.tmp.$$"
+    { cat "$known"; printf '%s\n' "$path"; } | LC_ALL=C sort -u > "$tmp" && mv "$tmp" "$known"
+  fi
+}
+
+datawatch(){
+  require_root; setup
+  [ "$ENABLE_DATA_MOVEMENT_SCAN" = 1 ] && [ "$ENABLE_DATA_MOVEMENT_WATCHER" = 1 ] || exit 0
+  [ -x /usr/bin/fs_usage ] || { log "Data movement watcher unavailable: fs_usage not found"; exit 0; }
+  local watch_roots now allowed root is_trash evidence source destination proc_base base_name ident dev ino kind prior
+  local pending_source="" pending_dev="" pending_ino="" pending_kind="" pending_proc="" pending_raw="" pending_ts=0
+  watch_roots="$(data_movement_dirs)"
+  [ -n "$watch_roots" ] || { log "Data movement watcher stopped: no monitored home directory found"; exit 0; }
+  datawatch_prune_identities
+  log "Data movement filesystem watcher started"
+  # Finder can move an item into Trash without exposing a usable rename record
+  # through fs_usage. Poll only the top level of the current user's Trash and
+  # correlate new entries against the short-lived device/inode identity map.
+  datawatch_trash_poll_loop "$watch_roots" &
+  local trash_poll_pid=$!
+  trap 'kill "$trash_poll_pid" >/dev/null 2>&1 || true' EXIT INT TERM
+
+  # fs_usage exposes low-level filesystem calls and Finder often reports rename
+  # source and destination separately. 3.4.11 keeps a short-lived device/inode
+  # path index so a folder created after the last 5-minute inventory can still be
+  # followed through rename -> move -> Trash -> permanent deletion.
+  /usr/bin/fs_usage -w -f filesys 2>/dev/null | /usr/bin/perl -ne '
+    chomp; $raw=$_; @f=split(/\s{2,}/,$raw); next unless @f >= 3;
+    $verb=lc($f[1] // ""); $verb =~ s/\s.*$//; $path="";
+    for ($i=2; $i<=$#f; $i++) {
+      $candidate=$f[$i] // "";
+      if ($candidate =~ m{(?:\[[^]]+\])?(/(?:System/Volumes/Data/)?Users/[^\s].*)$}) { $path=$1; last; }
+      if ($candidate =~ m{(?:\[[^]]+\])?(//Users/[^\s].*)$}) { $path=$1; $path =~ s{^//}{/}; last; }
+      if ($candidate =~ m{^/}) { $path=$candidate; last; }
+    }
+    $path =~ s{^/System/Volumes/Data/Users/}{/Users/};
+    next unless $path =~ m{^/};
+    $proc=$f[-1] // ""; $op="";
+    if ($verb =~ /rmdir/) {$op="RMDIR"}
+    elsif ($verb =~ /unlink|delete/) {$op="UNLINK"}
+    elsif ($verb =~ /mkdir/) {$op="MKDIR"}
+    elsif ($verb =~ /rename/) {$op="RENAME"}
+    elsif ($verb =~ /^open(?:at)?$/ && $raw =~ /\([^)]*[WC][^)]*\)/) {$op="TRACK"}
+    else {next}
+    print "$op\t$path\t$proc\t$raw\n";
+  ' | while IFS=$'\t' read -r op path proc raw; do
+    [ -n "$path" ] || continue
+    allowed=0; is_trash=0
+    while IFS= read -r root; do
+      [ -n "$root" ] || continue
+      case "$path" in "$root"|"$root"/*) allowed=1;; esac
+      case "$path" in "$root/.Trash"|"$root/.Trash"/*) allowed=1; is_trash=1;; esac
+      [ "$allowed" -eq 1 ] && break
+    done <<< "$watch_roots"
+    [ "$allowed" -eq 1 ] || continue
+
+    base_name="$(basename "$path")"
+    case "$base_name" in .DS_Store|.localized|._*|~\$*|.dat.nosync*|.AU.*|.com.google.Chrome.*|*.crdownload|*.sqlite-wal|*.sqlite-shm) continue;; esac
+    if [ "$is_trash" -eq 0 ]; then datawatch_excluded "$path" && continue; fi
+
+    now="$(date +%s)"; proc_base="${proc%%.*}"
+
+    # photolibraryd repeatedly issues mkdirat/unlink calls against the Photos
+    # library package root while maintaining it. Those are internal package
+    # operations, not user-created folders. Keep real Finder/user operations in
+    # ~/Pictures visible by filtering only the Photos daemon + library bundle.
+    if [ "$proc_base" = "photolibraryd" ]; then
+      case "$path" in *.photoslibrary|*.photoslibrary/*) continue;; esac
+    fi
+
+    case "$op" in
+      MKDIR)
+        printf -v evidence 'FILESYSTEM EVENT:\n%s' "$raw"
+        emit INFO data-movement "Folder created: $path" "$evidence" "datawatch:mkdir:$path:$now" observed
+        datawatch_track_identity "$path" >/dev/null 2>&1 || true
+        emit_software_download "$path" "$proc" "$raw"
+        ;;
+
+      RMDIR)
+        printf -v evidence 'FILESYSTEM EVENT:\n%s' "$raw"
+        if [ "$is_trash" -eq 1 ]; then
+          if ! datawatch_is_nested_trash_path "$path" "$watch_roots"; then
+            emit MEDIUM data-movement "Permanently deleted from Trash: $path" "$evidence" "datawatch:trash-rmdir:$path:$now" resolved
+          fi
+        else
+          emit MEDIUM data-movement "Folder deleted: $path" "$evidence" "datawatch:rmdir:$path:$now" resolved
+        fi
+        datawatch_record_recent delete "$path"; datawatch_forget_path "$path"
+        ;;
+
+      UNLINK)
+        printf -v evidence 'FILESYSTEM EVENT:\n%s' "$raw"
+        if [ "$is_trash" -eq 1 ]; then
+          if ! datawatch_is_nested_trash_path "$path" "$watch_roots"; then
+            emit MEDIUM data-movement "Permanently deleted from Trash: $path" "$evidence" "datawatch:trash-unlink:$path:$now" resolved
+          fi
+        else
+          emit MEDIUM data-movement "File deleted: $path" "$evidence" "datawatch:unlink:$path:$now" resolved
+        fi
+        datawatch_record_recent delete "$path"; datawatch_forget_path "$path"
+        ;;
+
+      TRACK)
+        # Track newly-created/rewritten user files silently so a move that
+        # happens before the next five-minute inventory can still be resolved.
+        datawatch_track_identity "$path" >/dev/null 2>&1 || true
+        emit_software_download "$path" "$proc" "$raw"
+        ;;
+
+      RENAME)
+        if [ -e "$path" ]; then
+          ident="$(datawatch_current_identity "$path" 2>/dev/null || true)"
+          IFS=$'\t' read -r dev ino kind <<< "$ident"
+          source=""
+
+          # Strongest correlation: a pending source rename with the same inode.
+          if [ -n "$pending_source" ] && [ $((now-pending_ts)) -le 8 ] && \
+             [ -n "$dev" ] && [ "$dev" = "$pending_dev" ] && [ "$ino" = "$pending_ino" ]; then
+            source="$pending_source"
+          fi
+
+          # Next best: the live identity map or the last periodic snapshot.
+          if [ -z "$source" ] && [ -n "$dev" ] && [ -n "$ino" ]; then
+            source="$(datawatch_prior_path_for_identity "$dev" "$ino" "$path" 2>/dev/null || true)"
+          fi
+          if [ -z "$source" ]; then source="$(snapshot_prior_path_for_current "$path" 2>/dev/null || true)"; fi
+
+          if [ -n "$source" ] && [ "$source" != "$path" ]; then
+            destination="$path"
+            printf -v evidence 'FROM: %s\nTO: %s\nPROCESS: %s\nCORRELATION: filesystem device/inode identity\n\nFILESYSTEM EVENT:\n%s' \
+              "$source" "$destination" "$proc_base" "$raw"
+            if [ "$is_trash" -eq 1 ]; then
+              emit MEDIUM data-movement "Moved to Trash: $source -> $destination" "$evidence" "datawatch:trash:$source:$destination:$now" resolved
+              datawatch_record_recent trash "$source" "$destination"
+            else
+              emit INFO data-movement "Moved or renamed: $source -> $destination" "$evidence" "datawatch:move:$source:$destination:$now" observed
+              datawatch_record_recent move "$source" "$destination"
+            fi
+            datawatch_forget_path "$source"
+            datawatch_track_identity "$destination" >/dev/null 2>&1 || true
+            emit_software_download "$destination" "$proc" "$raw"
+            pending_source=""; pending_dev=""; pending_ino=""; pending_kind=""; pending_proc=""; pending_raw=""; pending_ts=0
+            continue
+          fi
+
+          # No previous path was known. Track the destination so any following
+          # rename/move can still be correlated without waiting five minutes.
+          emit_software_download "$path" "$proc" "$raw"
+        else
+          # Finder frequently emits only the old path for rename/move. Recover
+          # its identity, then resolve that stable device/inode against the
+          # current monitored tree instead of waiting for a second rename line.
+          ident="$(datawatch_identity_for_path "$path" 2>/dev/null || true)"
+          IFS=$'\t' read -r dev ino kind <<< "$ident"
+          if [ -n "$dev" ] && [ -n "$ino" ]; then
+            destination=""
+            for _attempt in 1 2 3 4 5 6; do
+              destination="$(datawatch_find_path_for_identity "$dev" "$ino" "$path" 2>/dev/null || true)"
+              [ -n "$destination" ] && break
+              sleep 0.15
+            done
+            if [ -n "$destination" ] && [ "$destination" != "$path" ]; then
+              local destination_is_trash=0 destination_allowed=0
+              while IFS= read -r root; do
+                [ -n "$root" ] || continue
+                case "$destination" in "$root"|"$root"/*) destination_allowed=1;; esac
+                case "$destination" in "$root/.Trash"|"$root/.Trash"/*) destination_is_trash=1;; esac
+              done <<< "$watch_roots"
+              if [ "$destination_allowed" -eq 1 ] && { [ "$destination_is_trash" -eq 1 ] || ! datawatch_excluded "$destination"; }; then
+                printf -v evidence 'FROM: %s\nTO: %s\nPROCESS: %s\nCORRELATION: filesystem device/inode identity resolved after source-side rename\n\nFILESYSTEM EVENT:\n%s' \
+                  "$path" "$destination" "$proc_base" "$raw"
+                if [ "$destination_is_trash" -eq 1 ]; then
+                  emit MEDIUM data-movement "Moved to Trash: $path -> $destination" "$evidence" "datawatch:trash:$path:$destination:$now" resolved
+                  datawatch_record_recent trash "$path" "$destination"
+                else
+                  emit INFO data-movement "Moved or renamed: $path -> $destination" "$evidence" "datawatch:move:$path:$destination:$now" observed
+                  datawatch_record_recent move "$path" "$destination"
+                fi
+                datawatch_forget_path "$path"
+                datawatch_track_identity "$destination" >/dev/null 2>&1 || true
+                emit_software_download "$destination" "$proc" "$raw"
+                pending_source=""; pending_dev=""; pending_ino=""; pending_kind=""; pending_proc=""; pending_raw=""; pending_ts=0
+                continue
+              fi
+            fi
+            # Keep a short pending record as a fallback if filesystem visibility
+            # lagged behind the syscall trace.
+            pending_source="$path"; pending_dev="$dev"; pending_ino="$ino"; pending_kind="$kind"; pending_proc="$proc_base"; pending_raw="$raw"; pending_ts="$now"
+          fi
+        fi
+        ;;
+    esac
+
+    # Expire stale one-sided rename state. We intentionally do not emit a
+    # generic "renamed/moved" card when a destination cannot be proven.
+    if [ -n "$pending_source" ] && [ $((now-pending_ts)) -gt 8 ]; then
+      pending_source=""; pending_dev=""; pending_ino=""; pending_kind=""; pending_proc=""; pending_raw=""; pending_ts=0
+    fi
+  done
+}
+
+collect_transfer_tools(){
+  [ "$ENABLE_DATA_MOVEMENT_SCAN" = 1 ] || return 0
+  local all tool pattern matches slug now any=0 pid sockets evidence socket_file
+  all="$(ps -axo pid=,user=,command= 2>/dev/null || true)"
+  while IFS='|' read -r tool pattern; do
+    matches="$(printf '%s\n' "$all" | grep -Ei "$pattern" | grep -Ev 'MacAudit|grep -E' || true)"
+    slug="$(remote_tool_slug "$tool")"
+    socket_file="$(mktemp)"; evidence="$matches"
+    if [ -n "$matches" ]; then
+      any=1
+      for pid in $(printf '%s\n' "$matches" | awk '{print $1}' | grep -E '^[0-9]+$' || true); do
+        sockets="$(lsof -nP -a -p "$pid" -i 2>/dev/null | tail -n +2 | grep -Ev '127\.0\.0\.1|\[::1\]| localhost:|->127\.0\.0\.1|->\[::1\]' || true)"
+        [ -n "$sockets" ] && printf '%s\n' "$sockets" >> "$socket_file"
+      done
+      [ -s "$socket_file" ] && evidence="$(printf '%s\n\nNETWORK CONNECTIONS\n%s' "$matches" "$(cat "$socket_file")")"
+      set_active_state "transfer-tool-$slug" 1 MEDIUM data-transfer "$tool file-transfer process started" "$tool file-transfer process stopped" "$evidence" "$tool file-transfer process was already running when monitoring started"
+      if [ -s "$socket_file" ]; then
+        set_active_state "transfer-socket-$slug" 1 MEDIUM data-transfer "$tool has an external network connection" "$tool external network connection ended" "$(cat "$socket_file")" "$tool already had an external network connection when monitoring started"
+      else
+        set_active_state "transfer-socket-$slug" 0 MEDIUM data-transfer "" "$tool external network connection ended"
+      fi
+    else
+      set_active_state "transfer-tool-$slug" 0 MEDIUM data-transfer "" "$tool file-transfer process stopped"
+      set_active_state "transfer-socket-$slug" 0 MEDIUM data-transfer "" "$tool external network connection ended"
+    fi
+    rm -f "$socket_file"
+  done <<'TRANSFERTOOLS'
+scp|(^|[ /])scp([ ]|$)
+sftp|(^|[ /])sftp([ ]|$)
+rsync|(^|[ /])rsync([ ]|$)
+rclone|(^|[ /])rclone([ ]|$)
+TRANSFERTOOLS
+  if [ "$any" -eq 1 ]; then now="$(date +%s)"; printf '%s' "$now" > "$STATE/last-transfer-activity"; fi
+}
+
+collect_data_movement(){
+  [ "$ENABLE_DATA_MOVEMENT_SCAN" = 1 ] || return 0
+  local current old work python_bin="" min_bytes=$((DATA_MOVEMENT_MIN_FILE_MB*1024*1024)) lookback="$DATA_MOVEMENT_LOOKBACK_MINUTES" vol dir inventory_rc=0
+  current="$(mktemp)"; work="$(mktemp -d)"; old="$SNAP/data_movement_files.current"
+  data_movement_inventory "$current" "$work/inventory.meta" || inventory_rc=$?
+  if [ "$inventory_rc" -ne 0 ]; then
+    emit LOW data-movement-health "Filesystem inventory incomplete; previous baseline retained" "$(cat "$work/inventory.meta" 2>/dev/null || true)" "data-movement:inventory-incomplete" degraded
+    log "Data movement inventory incomplete (rc=$inventory_rc); previous baseline retained"
+    rm -f "$current"; rm -rf "$work"; return 0
+  fi
+  if [ ! -f "$old" ]; then
+    cp "$current" "$old"; emit INFO data-movement "Data movement baseline created" "" "baseline:data_movement" baseline
+  else
+    # Reconciliation is deliberately conservative. The live watcher is the
+    # primary source for short-lived create/delete/rename activity. Periodic
+    # inventory is only allowed to generate low-volume, high-confidence move or
+    # removal evidence. A missing root, large object-count collapse, or too many
+    # unresolved paths retains the previous good baseline.
+    for python_bin in /usr/bin/python3 /opt/homebrew/bin/python3 /usr/local/bin/python3; do [ -x "$python_bin" ] && break; done
+    "$python_bin" - "$old" "$current" "$work" "$STATE/last-transfer-activity" "$DATA_MOVEMENT_MAX_DROP_PERCENT" "$DATA_MOVEMENT_MAX_RECONCILE_CHANGES" "$STATE/datawatch-recent.tsv" <<'PYMOVE'
+import sys,time
+from pathlib import Path
+old,new,out,last=map(Path,sys.argv[1:5])
+max_drop_percent=int(sys.argv[5]); max_changes=int(sys.argv[6]); recent_file=Path(sys.argv[7])
+
+def parse(p):
+    d={}
+    for line in p.read_text(errors='replace').splitlines():
+        parts=line.split('|',5)
+        if len(parts)==6 and parts[0] in {'R','F','D'}:
+            kind,dev,ino,size,mtime,path=parts
+            d[path]={'kind':kind,'dev':dev,'ino':ino,'size':size,'mtime':mtime}
+            continue
+        # Backward compatibility only. 3.4.7 rebaselines, so these formats
+        # should not normally remain after upgrade.
+        parts=line.split('|',4)
+        if len(parts)==5:
+            dev,ino,size,mtime,path=parts; d[path]={'kind':'F','dev':dev,'ino':ino,'size':size,'mtime':mtime}
+            continue
+        parts=line.split('|',2)
+        if len(parts)==3:
+            size,mtime,path=parts; d[path]={'kind':'F','dev':'','ino':'','size':size,'mtime':mtime}
+    return d
+
+o,n=parse(old),parse(new)
+old_roots={p for p,m in o.items() if m['kind']=='R'}
+new_roots={p for p,m in n.items() if m['kind']=='R'}
+missing_roots=sorted(old_roots-new_roots)
+old_objects={p:m for p,m in o.items() if m['kind']!='R'}
+new_objects={p:m for p,m in n.items() if m['kind']!='R'}
+removed=sorted(set(old_objects)-set(new_objects),key=lambda p:(len(Path(p).parts),p))
+old_count=len(old_objects); new_count=len(new_objects)
+missing_count=max(0,old_count-new_count)
+drop_percent=(missing_count*100.0/old_count) if old_count else 0.0
+
+by_identity={}
+for path,meta in new_objects.items():
+    if meta.get('dev') and meta.get('ino'):
+        by_identity.setdefault((meta['kind'],meta['dev'],meta['ino']),[]).append(path)
+
+recent_sources=set(); recent_pairs=set()
+try:
+    cutoff=time.time()-15*60
+    for line in recent_file.read_text(errors='replace').splitlines():
+        parts=line.split('\t',3)
+        if len(parts)<3: continue
+        try: ts=float(parts[0])
+        except ValueError: continue
+        if ts < cutoff: continue
+        kind,source=parts[1],parts[2]
+        destination=parts[3] if len(parts)>3 else ''
+        if kind in {'delete','trash','move'}:
+            recent_sources.add(source)
+        if kind in {'trash','move'} and destination:
+            recent_pairs.add((source,destination))
+except OSError:
+    pass
+
+moves=[]; unresolved=[]; moved_dirs=[]
+for path in removed:
+    if any(path==src or path.startswith(src.rstrip('/')+'/') for src,_ in moved_dirs):
+        continue
+    meta=old_objects[path]; destination=None
+    if meta.get('dev') and meta.get('ino'):
+        for candidate in by_identity.get((meta['kind'],meta['dev'],meta['ino']),[]):
+            if candidate!=path:
+                destination=candidate; break
+    if destination:
+        if (path,destination) not in recent_pairs:
+            moves.append((path,destination,meta))
+        if meta['kind']=='D': moved_dirs.append((path,destination))
+    else:
+        # Live events are authoritative for recent moves/deletes. Suppress both
+        # the exact source and descendants of a recently handled directory so
+        # periodic reconciliation does not create a second, vaguer
+        # "destination not determined" card for the same operation.
+        recently_handled=any(path==src or path.startswith(src.rstrip('/')+'/') for src in recent_sources)
+        if not recently_handled:
+            unresolved.append((path,meta))
+
+# A large rename can remove thousands of old path strings while still resolving
+# to one directory move. Safety is therefore based on unresolved objects after
+# identity correlation, root visibility, and total inventory collapse.
+unresolved_count=len(unresolved)
+reject_reasons=[]
+if missing_roots:
+    reject_reasons.append(f'{len(missing_roots)} monitored root(s) were not present in the new inventory')
+if old_count>=100 and drop_percent>max_drop_percent:
+    reject_reasons.append(f'inventory object count dropped {drop_percent:.1f}% ({old_count} -> {new_count})')
+if unresolved_count>max_changes:
+    reject_reasons.append(f'{unresolved_count} unresolved disappearances exceed reconciliation limit {max_changes}')
+
+if reject_reasons:
+    sample=[p for p,_ in unresolved[:50]]
+    evidence=['DATA MOVEMENT RECONCILIATION REJECTED',*('Reason: '+x for x in reject_reasons),
+              f'Previous objects: {old_count}',f'Current objects: {new_count}',
+              f'Correlated moves/renames: {len(moves)}',f'Unresolved disappearances: {unresolved_count}',
+              f'Max unresolved changes: {max_changes}',f'Drop safety threshold: {max_drop_percent}%']
+    if missing_roots:
+        evidence += ['', 'Missing monitored roots:', *missing_roots]
+    if sample:
+        evidence += ['', 'Sample unresolved paths:', *sample]
+    (out/'inventory.reject').write_text('1')
+    (out/'removed.evidence').write_text('\n'.join(evidence)+'\n')
+    raise SystemExit(0)
+
+if moves or unresolved:
+    recent=False
+    try: recent=time.time()-int(last.read_text().strip()) <= 15*60
+    except Exception: pass
+    dir_moves=[x for x in moves if x[2]['kind']=='D']; file_moves=[x for x in moves if x[2]['kind']=='F']
+    unresolved_dirs=[x for x in unresolved if x[1]['kind']=='D']; unresolved_files=[x for x in unresolved if x[1]['kind']=='F']
+    sev='HIGH' if (recent and unresolved) else 'INFO'
+    pieces=[]
+    if dir_moves: pieces.append(f"{len(dir_moves)} folder{'s' if len(dir_moves)!=1 else ''} moved or renamed")
+    if file_moves: pieces.append(f"{len(file_moves)} file{'s' if len(file_moves)!=1 else ''} moved or renamed")
+    if unresolved_dirs: pieces.append(f"{len(unresolved_dirs)} folder{'s' if len(unresolved_dirs)!=1 else ''} disappeared; destination not determined")
+    if unresolved_files: pieces.append(f"{len(unresolved_files)} file{'s' if len(unresolved_files)!=1 else ''} disappeared; destination not determined")
+    msg=', '.join(pieces)
+    if recent and unresolved: msg += ' soon after transfer-tool activity'
+    evidence=[]
+    for source,destination,meta in dir_moves[:50]: evidence.append(f'FOLDER MOVED/RENAMED: {source}\n  TO: {destination}')
+    for source,destination,meta in file_moves[:50]: evidence.append(f'FILE MOVED/RENAMED: {source}\n  TO: {destination}\n  SIZE: {meta["size"]} bytes')
+    for path,meta in unresolved_dirs[:50]: evidence.append(f'FOLDER DISAPPEARED: {path}\n  DESTINATION: not determined')
+    for path,meta in unresolved_files[:50]: evidence.append(f'FILE DISAPPEARED: {path}\n  DESTINATION: not determined\n  SIZE: {meta["size"]} bytes')
+    detail=len(dir_moves)+len(file_moves)+len(unresolved_dirs)+len(unresolved_files)
+    if detail>200: evidence.append(f'EVIDENCE TRUNCATED: showing up to 50 examples per change type out of {detail} changes')
+    (out/'removed.sev').write_text(sev); (out/'removed.msg').write_text(msg); (out/'removed.evidence').write_text('\n'.join(evidence)+'\n')
+PYMOVE
+    if [ -f "$work/inventory.reject" ]; then
+      local warning_stamp warning_now warning_last=0 evidence
+      warning_stamp="$STATE/data-movement-inventory-warning-last"; warning_now="$(date +%s)"
+      [ -f "$warning_stamp" ] && warning_last="$(cat "$warning_stamp" 2>/dev/null || echo 0)"
+      evidence="$(cat "$work/removed.evidence" 2>/dev/null || true)
+
+$(cat "$work/inventory.meta" 2>/dev/null || true)"
+      if [ $((warning_now-warning_last)) -ge "$DATA_MOVEMENT_INVENTORY_WARNING_COOLDOWN_SECONDS" ]; then
+        emit LOW data-movement-health "Filesystem reconciliation skipped; previous baseline kept" "$evidence" "data-movement:inventory-incomplete" degraded
+        printf '%s' "$warning_now" > "$warning_stamp"
+      else
+        log "Suppressed repeated Data Movement reconciliation warning within cooldown"
+      fi
+      log "Data movement reconciliation rejected; previous baseline retained"
+    else
+      if [ -s "$work/removed.msg" ]; then
+        local reconciliation_evidence
+        reconciliation_evidence="$(cat "$work/removed.evidence" 2>/dev/null || true)"
+        if [ -n "${reconciliation_evidence//[[:space:]]/}" ]; then
+          emit "$(cat "$work/removed.sev")" data-movement "$(cat "$work/removed.msg")" "$reconciliation_evidence" "data-movement:removed:$(shasum -a 256 "$current" | awk '{print $1}')" changed
+        else
+          log "Suppressed Data Movement reconciliation summary because no path-level evidence was available"
+        fi
+      fi
+      cp "$current" "$old"
+    fi
+  fi
+  # Recently created archives in watched folders. Each path+mtime+size is emitted once.
+  while IFS= read -r dir; do
+    find "$dir" -xdev -type f \( -iname '*.zip' -o -iname '*.tar' -o -iname '*.tgz' -o -iname '*.tar.gz' -o -iname '*.7z' -o -iname '*.rar' \) -mmin -"$lookback" -size +"${min_bytes}"c -print 2>/dev/null || true
+  done < <(data_movement_dirs) | head -n 100 | while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    local_meta="$(stat -f '%z|%m' "$path" 2>/dev/null || true)"; [ -n "$local_meta" ] || continue
+    marker="$(printf '%s|%s' "$path" "$local_meta" | shasum -a 256 | awk '{print $1}')"
+    if [ ! -f "$STATE/data-seen-$marker" ]; then
+      : > "$STATE/data-seen-$marker"; emit MEDIUM data-movement "Archive created: $path" "FILE: $path\nSIZE_AND_MTIME: $local_meta" "data-archive:$marker" observed
+    fi
+  done
+  # Recent writes to mounted external volumes. Avoid the system Data/Preboot/Recovery volumes.
+  if [ -d /Volumes ]; then
+    for vol in /Volumes/*; do
+      [ -d "$vol" ] || continue
+      case "$(basename "$vol")" in Macintosh\ HD|Preboot|Recovery|VM|Update) continue;; esac
+      [ -d "$vol/Backups.backupdb" ] && continue
+      [ -e "$vol/.com.apple.timemachine.supported" ] && continue
+      find "$vol" -xdev -type f -mmin -"$lookback" -size +"${min_bytes}"c -print 2>/dev/null | head -n 100 | while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        local_meta="$(stat -f '%z|%m' "$path" 2>/dev/null || true)"; [ -n "$local_meta" ] || continue
+        marker="$(printf '%s|%s' "$path" "$local_meta" | shasum -a 256 | awk '{print $1}')"
+        if [ ! -f "$STATE/data-seen-$marker" ]; then
+          : > "$STATE/data-seen-$marker"; emit MEDIUM data-movement "File written to external volume: $path" "DESTINATION_FILE: $path\nSIZE_AND_MTIME: $local_meta" "data-external:$marker" observed
+        fi
+      done
+    done
+  fi
+  rm -f "$current"; rm -rf "$work"
+  find "$STATE" -name 'data-seen-*' -mtime "+$RETENTION_DAYS" -delete 2>/dev/null || true
+}
+
 remote_processes(){ ps -axo pid=,user=,command= 2>/dev/null | awk 'BEGIN{IGNORECASE=1} /\/ARDAgent([ .\/]|$)|\/screensharingd([ .\/]|$)|jumpcloud-assist-(service|launcher)|TeamViewer|AnyDesk|Splashtop|RustDesk|ScreenConnect|ConnectWise|Bomgar|BeyondTrust|LogMeIn|RealVNC|TigerVNC/ {if($0 !~ /MacAudit|awk/) print}'; }
 
 remote_tool_match(){
@@ -341,6 +1432,7 @@ collect_fast(){
   # Remove legacy aggregate state files from 3.3.1 and earlier. They could only
   # say that "some" support software was running and could not identify exits.
   rm -f "$STATE/active-remoteproc" "$STATE/active-remotesockets"
+  collect_transfer_tools
 }
 
 collect_standard(){
@@ -359,13 +1451,74 @@ collect_standard(){
   f="$(mktemp)"; { find /Users -path '*/.ssh/authorized_keys' -type f -maxdepth 4 -exec shasum -a 256 {} \; 2>/dev/null | sort; [ -f /var/root/.ssh/authorized_keys ] && shasum -a 256 /var/root/.ssh/authorized_keys; [ -f /etc/ssh/sshd_config ] && shasum -a 256 /etc/ssh/sshd_config; } > "$f"; snapshot_diff ssh_configuration HIGH ssh "$f"; rm -f "$f"
   f="$(mktemp)"; { dscl . list /Users UniqueID 2>/dev/null | awk '$2 >= 500 {print}' | sort; dscl . read /Groups/admin GroupMembership 2>/dev/null; } > "$f"; snapshot_diff user_and_admin_accounts CRITICAL identity "$f"; rm -f "$f"
   f="$(mktemp)"; { echo "sip=$(csrutil status 2>/dev/null)"; echo "gatekeeper=$(spctl --status 2>/dev/null)"; echo "filevault=$(fdesetup status 2>/dev/null)"; echo "firewall=$(firewall_state)"; echo "stealth=$(stealth_state)"; } > "$f"; snapshot_diff security_settings HIGH security-settings "$f"; rm -f "$f"
-  f="$(mktemp)"; { for d in /Library/LaunchDaemons /Library/LaunchAgents /Users/*/Library/LaunchAgents; do [ -d "$d" ] && find "$d" -maxdepth 1 -type f -name '*.plist' -exec shasum -a 256 {} \; 2>/dev/null; done; find /etc/periodic -type f -maxdepth 3 -exec shasum -a 256 {} \; 2>/dev/null; } | sort > "$f"; snapshot_diff automatic_start_items HIGH persistence "$f"; rm -f "$f"
+  collect_persistence
+}
+
+collect_software_downloads(){
+  [ "$ENABLE_SOFTWARE_DOWNLOAD_SCAN" = 1 ] || return 0
+  local f root dir path kind oldfile
+  f="$(mktemp)"; oldfile="$SNAP/software_downloads.current"
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    for dir in "$root/Downloads" "$root/Desktop" "$root/Documents/Web Downloads"; do
+      [ -d "$dir" ] || continue
+      while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        kind="$(software_download_kind "$path" 2>/dev/null || true)"
+        [ -n "$kind" ] && printf '%s\n' "$path"
+      done < <(find "$dir" -maxdepth 2 \( -type f \( -iname '*.dmg' -o -iname '*.pkg' -o -iname '*.mpkg' -o -iname '*.zip' \) -o -type d -iname '*.app' \) -print 2>/dev/null)
+    done
+  done < <(data_movement_dirs) | LC_ALL=C sort -u > "$f"
+
+  # A first inventory is a baseline, not evidence that every existing installer
+  # was downloaded just now. Emit one informational baseline card only.
+  if [ ! -f "$oldfile" ] || [ ! -f "$STATE/software-downloads-baselined" ]; then
+    cp "$f" "$oldfile"
+    : > "$STATE/software-downloads-baselined"
+    emit INFO software-download "Software download baseline created" "$(wc -l < "$f" | tr -d ' ') existing software-download candidates recorded; no download-time claim made." "baseline:software_downloads" baseline
+    rm -f "$f"
+    return 0
+  fi
+  # Never allow a transient empty/incomplete discovery pass to erase a good
+  # download baseline and then report every old installer as newly downloaded.
+  local old_count new_count added_count removed_count work
+  old_count="$(wc -l < "$oldfile" | tr -d ' ')"; new_count="$(wc -l < "$f" | tr -d ' ')"
+  if [ "$old_count" -gt 0 ] && [ "$new_count" -eq 0 ]; then
+    log "Software download inventory returned empty while previous baseline had $old_count entries; previous baseline retained"
+    rm -f "$f"
+    return 0
+  fi
+  # A severe count collapse is more likely an incomplete discovery pass than
+  # dozens of deliberate installer removals. Keep the last good baseline so a
+  # later healthy pass cannot re-announce old files as new downloads.
+  if [ "$old_count" -ge 10 ] && [ $((new_count*100/old_count)) -lt 20 ]; then
+    log "Software download inventory collapsed from $old_count to $new_count entries; previous baseline retained"
+    rm -f "$f"
+    return 0
+  fi
+  work="$(mktemp -d)"
+  LC_ALL=C comm -13 "$oldfile" "$f" > "$work/added" || true
+  LC_ALL=C comm -23 "$oldfile" "$f" > "$work/removed" || true
+  added_count="$(wc -l < "$work/added" | tr -d ' ')"; removed_count="$(wc -l < "$work/removed" | tr -d ' ')"
+  if [ "$added_count" -gt 0 ]; then
+    local evidence
+    evidence="$(awk '{print "NEW SOFTWARE DOWNLOAD CANDIDATE: "$0}' "$work/added" | head -n 100)"
+    emit INFO software-download "Software downloads detected: $added_count new" "$evidence" "software-downloads:new:$added_count:$(date +%s)" observed
+  fi
+  # Removals are baseline maintenance, not download evidence. Update silently.
+  cp "$f" "$oldfile"
+  rm -rf "$work"; rm -f "$f"
+}
+
+collect_data_group(){
+  collect_data_movement
+  collect_software_downloads
 }
 
 collect_slow(){
   local f found db
   f="$(mktemp)"; { profiles status -type enrollment 2>/dev/null || true; profiles show -type enrollment 2>/dev/null || true; systemextensionsctl list 2>/dev/null || true; } > "$f"; snapshot_diff device_management HIGH device-management "$f"; rm -f "$f"
-  f="$(mktemp)"; { find /Applications /Users/*/Applications -maxdepth 1 -type d -name '*.app' -print 2>/dev/null | sort; pkgutil --pkgs 2>/dev/null | sort; } > "$f"; snapshot_diff installed_software MEDIUM software "$f"; rm -f "$f"
+  f="$(mktemp)"; { find /Applications /Users/*/Applications -maxdepth 1 -type d -name '*.app' -print 2>/dev/null; pkgutil --pkgs 2>/dev/null; } | LC_ALL=C sort -u > "$f"; snapshot_diff installed_software MEDIUM software "$f"; rm -f "$f"
   [ "$ENABLE_TCC_SCAN" = 1 ] && { f="$(mktemp)"; found=0; for db in "/Library/Application Support/com.apple.TCC/TCC.db" /Users/*/Library/Application\ Support/com.apple.TCC/TCC.db; do [ -f "$db" ] || continue; if sqlite3 "$db" 'select service,client,auth_value,auth_reason,last_modified from access order by service,client;' >> "$f" 2>/dev/null; then found=1; else echo "UNREADABLE:$db" >> "$f"; fi; done; sort -u "$f" -o "$f"; snapshot_diff privacy_permissions HIGH privacy-permissions "$f"; [ "$found" -eq 0 ] && emit LOW privacy-permissions "Privacy permission databases could not be read" "Grant Full Disk Access to the MacAudit executable only if your organisation approves it." "tcc-unreadable" degraded; rm -f "$f"; }
 }
 
@@ -417,7 +1570,13 @@ PYRET
 }
 
 run_all(){
-  require_root; setup; acquire_lock; local started completed fast='null' standard='null' slow='null' failures=0
+  require_root; setup
+  if ! acquire_lock; then
+    local lock_rc=$?
+    [ "$lock_rc" -eq 75 ] && return 0
+    return "$lock_rc"
+  fi
+  local started completed fast='null' standard='null' data_movement='null' slow='null' failures=0
   # MacAudit 3.3.0 and earlier could accidentally share standard/slow snapshot names
   # because of Bash dynamic scoping in snapshot_diff(). Those files are invalid.
   rm -f "$SNAP/standard.current" "$SNAP/slow.current"
@@ -428,17 +1587,128 @@ run_all(){
     rm -f "$SNAP/remote_access.current"
     : > "$STATE/schema-3.3.3"
   fi
+  # 3.4.0 changes persistence snapshots to semantic+full hashes and introduces
+  # filename-level local data-movement baselines. Start those schemas cleanly.
+  if [ ! -f "$STATE/schema-3.4.0" ]; then
+    rm -f "$SNAP/automatic_start_items.current" "$SNAP/automatic_start_item_files.current" "$SNAP/data_movement_files.current"
+    : > "$STATE/schema-3.4.0"
+  fi
+  # 3.4.2 adds device/inode identity to data-movement snapshots so local
+  # renames and moves can be correlated to their destination. Rebaseline once.
+  if [ ! -f "$STATE/schema-3.4.2" ]; then
+    rm -f "$SNAP/data_movement_files.current"
+    : > "$STATE/schema-3.4.2"
+  fi
+  # 3.4.3 expands Data Movement to whole-home monitoring and records directories
+  # as first-class objects. Rebaseline once to avoid a migration-only flood.
+  if [ ! -f "$STATE/schema-3.4.3" ]; then
+    rm -f "$SNAP/data_movement_files.current"
+    : > "$STATE/schema-3.4.3"
+  fi
+  # 3.4.4 hardens whole-home inventory, expands generated-directory exclusions,
+  # and tracks local moves independently of transfer-size thresholds. Rebaseline
+  # once so the schema/exclusion change cannot look like mass deletion.
+  if [ ! -f "$STATE/schema-3.4.4" ]; then
+    rm -f "$SNAP/data_movement_files.current"
+    : > "$STATE/schema-3.4.4"
+  fi
+  # 3.4.5 canonicalises the installed-software inventory and adds the
+  # filesystem event watcher. Rebaseline software once so historical ordering
+  # differences cannot create a migration-only software event.
+  if [ ! -f "$STATE/schema-3.4.5" ]; then
+    rm -f "$SNAP/installed_software.current"
+    : > "$STATE/schema-3.4.5"
+  fi
+  # 3.4.6 makes Data Movement reconciliation conservative, adds root sentinels,
+  # defaults whole-home monitoring to the console user, and rebaselines
+  # persistence so the MacAudit datawatch LaunchDaemon is not reported as a
+  # migration-only startup item.
+  if [ ! -f "$STATE/schema-3.4.6" ]; then
+    rm -f "$SNAP/data_movement_files.current" "$SNAP/automatic_start_items.current" "$SNAP/automatic_start_item_files.current"
+    rm -f "$STATE/data-movement-inventory-warning-last"
+    : > "$STATE/schema-3.4.6"
+  fi
+  # 3.4.8 adds user-presence tagging, software-download detection and improved
+  # live move correlation. Keep existing audit history and baselines intact.
+  if [ ! -f "$STATE/schema-3.4.8" ]; then
+    rm -f "$SNAP/software_downloads.current"
+    : > "$STATE/schema-3.4.8"
+  fi
+  # 3.4.9 stores field-level startup semantics and uses stricter presence detection.
+  if [ ! -f "$STATE/schema-3.4.9" ]; then
+    rm -f "$SNAP/automatic_start_items.current" "$SNAP/automatic_start_item_files.current" "$SNAP/automatic_start_item_details.current"
+    : > "$STATE/schema-3.4.9"
+  fi
+  # 3.4.10 narrows software-download classification. Rebaseline this
+  # detector once so older broad ZIP classification cannot create a mass-removal event.
+  if [ ! -f "$STATE/schema-3.4.10" ]; then
+    rm -f "$SNAP/software_downloads.current"
+    : > "$STATE/schema-3.4.10"
+  fi
+  # 3.4.11 adds a live device/inode path index so objects created after the
+  # periodic baseline can be followed through rename, move, Trash and deletion.
+  if [ ! -f "$STATE/schema-3.4.11" ]; then
+    rm -f "$STATE/datawatch-identities.tsv"
+    : > "$STATE/schema-3.4.11"
+  fi
+  # 3.4.12 resolves source-only Finder rename records by device/inode search
+  # and hardens software-download baseline continuity. Preserve existing download
+  # baselines; only rebuild the short-lived live identity cache.
+  if [ ! -f "$STATE/schema-3.4.12" ]; then
+    rm -f "$STATE/datawatch-identities.tsv"
+    : > "$STATE/schema-3.4.12"
+  fi
+  # 3.4.13 finalises Trash correlation/path parsing and repairs software-download
+  # baseline continuity after the 3.4.11 empty-baseline bug. Rebaseline downloads
+  # exactly once; subsequent upgrades/restarts preserve the baseline marker.
+  if [ ! -f "$STATE/schema-3.4.13" ]; then
+    rm -f "$SNAP/software_downloads.current" "$STATE/software-downloads-baselined"
+    rm -f "$STATE/datawatch-identities.tsv"
+    : > "$STATE/schema-3.4.13"
+  fi
+  # 3.4.14 adds a Trash-appearance correlator for Finder moves that do not
+  # produce a usable rename record. Preserve all existing baselines and identity
+  # state so the new correlator can immediately use recent path history.
+  if [ ! -f "$STATE/schema-3.4.14" ]; then
+    : > "$STATE/schema-3.4.14"
+  fi
+  # 3.4.17 restores independent Trash visibility and removes the concurrent
+  # identity-state rewrite race. Existing Trash contents are baselined by the
+  # watcher itself, so upgrades do not create fake Trash events.
+  if [ ! -f "$STATE/schema-3.4.17" ]; then
+    rm -f "$STATE/datawatch-trash-seen.tsv" "$STATE/datawatch-identities.lock"
+    : > "$STATE/schema-3.4.17"
+  fi
+  # 3.4.18 is a presentation/noise-control update. Preserve every existing
+  # baseline and identity cache so upgrading cannot create migration events.
+  if [ ! -f "$STATE/schema-3.4.18" ]; then
+    : > "$STATE/schema-3.4.18"
+  fi
   started="$(now_iso)"
   due fast "$FAST_INTERVAL_SECONDS" && fast="$(run_group fast collect_fast)" || true
   due standard "$STANDARD_INTERVAL_SECONDS" && standard="$(run_group standard collect_standard)" || true
+  due data_movement "$DATA_MOVEMENT_INTERVAL_SECONDS" && data_movement="$(run_group data_movement collect_data_group)" || true
   due slow "$SLOW_INTERVAL_SECONDS" && slow="$(run_group slow collect_slow)" || true
   prune_event_history
   find "$LOG_DIR" -type f ! -name 'events.jsonl' -mtime "+$RETENTION_DAYS" -delete 2>/dev/null || true
-  completed="$(now_iso)"; printf '{"version":"%s","status":"ok","started_at":"%s","completed_at":"%s","groups":{"fast":%s,"standard":%s,"slow":%s}}\n' "$VERSION" "$started" "$completed" "$fast" "$standard" "$slow" > "$HEALTH"; chmod 600 "$HEALTH"
+  completed="$(now_iso)"; printf '{"version":"%s","status":"ok","started_at":"%s","completed_at":"%s","groups":{"fast":%s,"standard":%s,"data_movement":%s,"slow":%s}}\n' "$VERSION" "$started" "$completed" "$fast" "$standard" "$data_movement" "$slow" > "$HEALTH"; chmod 600 "$HEALTH"
 }
 
-status(){ setup; echo "MacAudit $VERSION"; [ -r "$HEALTH" ] && cat "$HEALTH" || echo "No successful scan yet."; launchctl print system/com.local.macaudit 2>/dev/null | head -n 20 || true; }
+status(){
+  setup; echo "MacAudit $VERSION"
+  if [ -r "$HEALTH" ]; then
+    if grep -q '"version":"'"$VERSION"'"' "$HEALTH" 2>/dev/null; then
+      cat "$HEALTH"
+    else
+      echo "Stale health record from an older MacAudit version:"
+      cat "$HEALTH"
+    fi
+  else
+    echo "No successful scan yet."
+  fi
+  launchctl print system/com.local.macaudit 2>/dev/null | head -n 20 || true
+}
 open_dashboard(){ setup; local token_file="$BASE/dashboard.token" token uid user url; [ -r "$token_file" ] || { echo "Dashboard token is missing. Re-run the installer." >&2; exit 1; }; token="$(cat "$token_file")"; uid="$(stat -f '%u' /dev/console 2>/dev/null || echo 0)"; user="$(stat -f '%Su' /dev/console 2>/dev/null || true)"; url="http://127.0.0.1:$DASHBOARD_PORT/?token=$token"; echo "Opening the private MacAudit dashboard."; [ "$uid" -gt 500 ] && launchctl asuser "$uid" sudo -u "$user" open "$url" >/dev/null 2>&1 || echo "$url"; }
 
 case "${1:-run}" in
- run) run_all;; status) require_root; status;; dashboard) require_root; open_dashboard;; report) require_root; setup; tail -n "${2:-100}" "$EVENTS";; baseline) require_root; setup; rm -f "$SNAP"/*.current "$STATE"/due-*; run_all;; notify-test) require_root; setup; emit HIGH test "MacAudit notification test succeeded" "Local notification test" "notify-test-$(date +%s)" test;; *) echo 'Usage: macaudit {run|status|dashboard|report [lines]|baseline|notify-test}'; exit 2;; esac
+ run) run_all;; datawatch) datawatch;; status) require_root; status;; dashboard) require_root; open_dashboard;; report) require_root; setup; tail -n "${2:-100}" "$EVENTS";; baseline) require_root; setup; rm -f "$SNAP"/*.current "$STATE"/due-*; run_all;; notify-test) require_root; setup; emit HIGH test "MacAudit notification test succeeded" "Local notification test" "notify-test-$(date +%s)" test;; *) echo 'Usage: macaudit {run|datawatch|status|dashboard|report [lines]|baseline|notify-test}'; exit 2;; esac

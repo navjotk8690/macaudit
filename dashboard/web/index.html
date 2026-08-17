@@ -12,7 +12,7 @@
       <div>
         <div class="eyebrow">LOCAL SECURITY CONSOLE</div>
         <h1>MacAudit</h1>
-        <p>Remote access, screen permissions, startup items, accounts, software, and Mac security settings.</p>
+        <p>Remote access, IP connections, screen permissions, files, software, startup items, accounts, and Mac security settings.</p>
       </div>
       <div id="healthBadge" class="live"><span></span><b>Checking</b> · refreshes every 10s</div>
     </header>
@@ -38,6 +38,7 @@
             <input type="date" id="dateTo" aria-label="End date">
           </div>
           <select id="severity" aria-label="Filter by severity"><option value="">All severities</option><option>CRITICAL</option><option>HIGH</option><option>MEDIUM</option><option>LOW</option><option>INFO</option></select>
+          <select id="presence" aria-label="Filter by user presence"><option value="">All presence states</option><option value="AWAY">While I was away / locked</option><option value="ACTIVE">While I was active</option><option value="LOCKED">Screen locked</option><option value="LOGGED_OUT">Logged out</option><option value="UNKNOWN">Presence unknown</option></select>
           <input id="search" placeholder="Search events…" aria-label="Search events">
         </div>
       </div>
@@ -57,6 +58,11 @@
         <div class="panel-title compact-title"><div><h2>Remote tools</h2><span>running now</span></div></div>
         <div id="tools" class="tools"></div>
       </article>
+    </section>
+
+    <section class="panel monitor-panel">
+      <div class="panel-title compact-title"><div><h2>Running applications</h2><span>GUI and selected security-relevant processes</span></div></div>
+      <div id="applications" class="tools"></div>
     </section>
 
     <section class="panel monitor-panel">

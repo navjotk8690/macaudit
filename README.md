@@ -1,6 +1,6 @@
 # MacAudit
 
-> **Version 3.3.3**
+> **Version 3.4.18**
 
 MacAudit is a **local, read-only macOS auditing system** focused on remote access, SSH, privacy permissions, MDM, persistence, user accounts, security controls, installed software, and evidence timelines.
 
@@ -44,6 +44,39 @@ Unlike many security products, **MacAudit never uploads telemetry, never require
 - Installed applications and package changes
 
 ---
+
+## Data movement monitoring
+
+MacAudit 3.4 adds local-only filename-level evidence for data movement. It can record:
+
+- `scp`, `sftp`, `rsync`, and `rclone` process lifecycle activity
+- creation of sizeable archives in configured user folders
+- sizeable files written to mounted external volumes
+- movement or removal of sizeable files from configured Desktop, Documents, and Downloads folders
+- local move/rename correlation using filesystem identity, including the detected destination path when it can be established
+- stronger correlation when a monitored file disappears shortly after transfer-tool activity
+
+This evidence stays local in MacAudit's root-owned state/log files. It is evidence of activity, **not automatic proof of exfiltration**. HTTPS/encrypted transfers can prevent MacAudit from proving which file contents crossed the network.
+
+Default settings:
+
+```text
+ENABLE_DATA_MOVEMENT_SCAN=1
+DATA_MOVEMENT_RECORD_FILENAMES=1
+DATA_MOVEMENT_MIN_FILE_MB=1
+DATA_MOVEMENT_TRACK_MIN_BYTES=0
+DATA_MOVEMENT_MAX_DROP_PERCENT=35
+DATA_MOVEMENT_LOOKBACK_MINUTES=10
+DATA_MOVEMENT_INTERVAL_SECONDS=300
+DATA_MOVEMENT_WATCH_FOLDERS=Desktop,Documents,Downloads
+```
+
+The watched folder names are applied to local user home directories. Transfer-tool process/network checks remain fast, while filesystem data-movement scans run every five minutes by default. Increase `DATA_MOVEMENT_MIN_FILE_MB` or `DATA_MOVEMENT_INTERVAL_SECONDS` if you prefer lower scan overhead.
+
+## Smarter startup-item monitoring
+
+MacAudit now fingerprints the persistence-relevant fields inside LaunchAgent and LaunchDaemon plists separately from the raw file hash. Changes to executable paths, arguments, `RunAtLoad`, `KeepAlive`, users, schedules, watched paths, sockets and similar startup behaviour remain HIGH events. Metadata-only rewrites that do not change effective startup behaviour are recorded as INFO instead of repeatedly generating HIGH alerts.
+
 
 # Important limitations
 
@@ -217,50 +250,71 @@ If a banner does not appear, check Notification settings for `osascript` or Scri
 
 ---
 
-# What's New in 3.3.3
 
-- Remote-access state now compares only stable macOS sharing settings.
-- Remote-support app lifecycle and external network activity are tracked separately.
-- Harmless process/socket ordering changes no longer create remote-access HIGH events.
-- Initial baseline events now clearly explain that MacAudit recorded a starting point.
-- Current security posture highlights FileVault, Firewall, SIP and Gatekeeper when disabled.
-- Severity cards are labelled as historical event counts, not current security status.
-- Firewall detection now uses Apple's Application Firewall command when available.
+# What's New in 3.4.18
 
----
+3.4.18 is a polish and repository-safety release. Periodic Data Movement reconciliation now recognises recent live move/delete events for both a source path and its descendants, preventing a second vague `destination not determined` event after an already-resolved directory operation. Emptying a folder from Trash now reports the top-level Trash item rather than every child file inside it.
 
-# What's New in 3.3.2
+The Running applications panel now uses the more accurate `RUNNING` label and describes its scope as GUI plus selected security-relevant processes. No monitoring baselines are reset by this upgrade.
 
-### Remote-tool lifecycle tracking
+A local `scripts/privacy-check.sh` helper is included for pre-push checks. It scans project files for common secret/token formats, private-key material, concrete macOS home paths, email addresses and public IPv4 literals; optional extra terms can be supplied for names, hostnames or company domains.
 
-Remote-support products are tracked independently. Starting or closing TeamViewer no longer gets hidden by an always-running management tool such as JumpCloud Assist. MacAudit records specific lifecycle events such as **TeamViewer started** and **TeamViewer stopped**, and separately records when that tool gains or loses an external network connection. Background TeamViewer keychain/uninstaller helpers do not by themselves keep the dashboard marked as Running.
+Before publishing a checkout, run:
 
-On the first scan, a tool that is already active is described as **already running when monitoring started** rather than falsely claiming it just started.
+```bash
+./scripts/privacy-check.sh .
+```
 
-### Intelligent event descriptions
+You can also supply project-specific terms that must not appear in the public tree:
 
-MacAudit interprets baseline differences before presenting them on the dashboard. The default event view explains the actual change while the original forensic output remains available under **System log / raw evidence**. Initial baseline events explicitly explain that MacAudit is recording a starting point for future comparisons.
+```bash
+./scripts/privacy-check.sh . your-name your-hostname company.example
+```
 
-Examples include:
+The checker inspects the current project tree (or Git-visible files when run inside a repository). It does not rewrite or inspect prior Git commits, so an existing repository with sensitive data in history must be cleaned separately before publication.
 
-- `3 applications added, 1 application removed` instead of a long software inventory diff
-- `2 startup items added, 1 startup item modified` while retaining SHA-256 hashes in raw evidence
-- `Administrator access granted to alice` instead of an unexplained group-membership line
-- `FileVault changed from ... to ...` when a single macOS security control changes
+# What's New in 3.4.17
 
-### Preserved from 3.2.5
+3.4.17 fixes the Finder-to-Trash regression without changing the working Desktop/Projects move resolver. Trash monitoring now keeps its own startup baseline, notices every newly appearing top-level Trash entry, and then attempts `FROM -> TO` correlation using both the current identity map and recent device/inode history. If macOS does not provide enough evidence to prove the source, MacAudit still records `Item appeared in Trash` rather than losing the transition entirely.
 
-- Authenticated local dashboard
-- Clickable severity cards and date filtering
-- Human-readable explanations and recommended actions
-- Expandable raw system evidence
-- Collector heartbeat and active/resolved event tracking
-- Native notifications
-- Installer verification
-- 90-day timestamp-based event retention
+The identity map is now serialised so the background Trash observer and live filesystem watcher cannot overwrite each other's state. Permanent removal from Trash continues to use `unlink`/`rmdir` evidence.
 
+Photos Library maintenance is also quieter: `photolibraryd` package-root churn is ignored, and periodic reconciliation treats `.photoslibrary` contents as an opaque package instead of walking the internal caches/databases. Ordinary user files in `~/Pictures` remain monitored.
 
----
+# What's New in 3.4.14
+
+3.4.14 added the first dedicated Trash-appearance correlator and Finder/Trash path normalisation. 3.4.17 supersedes that implementation by removing its shared-state race and restoring fallback Trash visibility.
+
+# What's New in 3.4.12
+
+### Finder move correlation that does not depend on two rename lines
+
+Finder can expose only the **source** path for a rename/move in `fs_usage`. MacAudit 3.4.12 now resolves that source's stable filesystem device/inode identity against the current monitored user tree to find the destination. This is used only when MacAudit already knows the object's identity from the live watcher or the periodic baseline.
+
+For the intended workflow:
+
+```text
+Desktop/untitled folder
+  -> Desktop/example-folder
+  -> Projects/example-folder
+  -> ~/.Trash/example-folder
+  -> permanently removed
+```
+
+MacAudit can now record `FROM` -> `TO` for the rename/move stages, classify a move into Trash separately, and classify the final `unlink`/`rmdir` from Trash as permanent deletion.
+
+### Newly created files are tracked before the five-minute scan
+
+Writable/create-style file opens are used only to seed the local device/inode path map. They do not create user-facing events by themselves. This allows a newly created file that is moved before the next periodic inventory to still participate in later move correlation.
+
+### Software-download baseline continuity
+
+A transient empty or severely collapsed software-download inventory no longer replaces a good baseline. Removals are treated as baseline maintenance rather than new-download evidence, so an incomplete scan cannot create a later false `52 new` event for files that were already present.
+
+### Existing monitoring remains enabled
+
+3.4.12 retains presence/away tagging, active SSH source/socket evidence, remote-support external IP/port checks, installed-software monitoring, software-download detection, startup-item persistence checks, TCC/privacy permissions, users/admins, MDM, Remote Login, FileVault, Firewall, SIP and Gatekeeper monitoring.
+
 
 # Privacy
 
@@ -285,3 +339,32 @@ The uninstall process intentionally preserves evidence and baselines unless you 
 # License
 
 Released under the **MIT License**. See `LICENSE` for details.
+### Activity while you are away
+
+MacAudit 3.4.12 tags new events with whether the console user was active, idle/away, the screen was locked, nobody was logged in, or presence could not be determined. The dashboard can filter to **While I was away / locked**. Presence is inferred locally from the console session, screen-lock state when macOS exposes it, and HID idle time.
+
+### Presence reliability in 3.4.12
+
+`ACTIVE` now requires three signals at the time the event is recorded: an unlocked console session, an awake display, and recent HID input. This prevents background wake activity from being labelled as if a person were using the Mac. SSH and supported remote-tool activity recorded while `AWAY`, `LOCKED`, or `LOGGED_OUT` is explicitly marked as unattended.
+
+### Persistence deduplication in 3.4.12
+
+Startup-item evidence now identifies the exact semantic fields that changed (for example `ProgramArguments`, `RunAtLoad`, or `KeepAlive`) instead of showing only old/new hashes. Repeated changes to the same path and same set of semantic fields are suppressed for `PERSISTENCE_CHANGE_COOLDOWN_SECONDS` (21600 seconds / six hours by default). Different fields or different startup items still produce separate alerts.
+
+### Software downloads and installations
+
+MacAudit distinguishes software-like downloads from installed software. The live watcher records `.dmg`, `.pkg`, `.mpkg`, `.app`, and ZIP archives only when the ZIP actually contains an application bundle or installer package. Existing files are baselined and are not claimed as newly downloaded. The slower installed-software inventory separately records applications and installer receipts that were actually added or removed.
+
+
+### Software-download baseline safety in 3.4.12
+
+The first software-download inventory records existing installer candidates as a baseline instead of reporting them as new downloads. Generic ZIP archives containing documents, source code, exports or backups are no longer classified as software solely because of the `.zip` extension.
+
+### Evidence-backed reconciliation in 3.4.12
+
+Periodic Data Movement summaries are emitted only when MacAudit has path-level evidence for the affected files or folders. A count-only reconciliation with no source/destination paths is suppressed rather than shown as an unexplained event card.
+
+### Remote connection evidence
+
+The existing remote-access checks remain enabled. Active SSH evidence includes socket/source-address details exposed by `lsof`, and supported remote-support processes are checked for non-loopback external IP/port connections. A running support agent or external service connection is capability evidence, not by itself proof of an active technician session.
+

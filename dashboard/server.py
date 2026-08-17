@@ -45,6 +45,20 @@ def live_status():
     screen=bool(command('/bin/launchctl','print','system/com.apple.screensharing'))
     processes=command('/bin/ps','-axo','command=')
     lines=processes.splitlines()
+    app_rows=command('/bin/ps','-axo','pid=,user=,etime=,command=').splitlines()
+    applications=[]
+    seen_apps=set()
+    for row in app_rows:
+        m=re.match(r'\s*(\d+)\s+(\S+)\s+(\S+)\s+(.+?\.app/Contents/MacOS/[^\s]+)(?:\s|$)',row)
+        if not m: continue
+        pid,user,elapsed,exe=m.groups()
+        app_path=exe.split('.app/',1)[0]+'.app'
+        name=Path(app_path).stem
+        key=(user,app_path)
+        if key in seen_apps: continue
+        seen_apps.add(key)
+        applications.append({'name':name,'pid':int(pid),'user':user,'elapsed':elapsed,'path':app_path,'executable':exe})
+    applications.sort(key=lambda x:x['name'].lower())
     tools={name:any(re.search(pattern, line, re.IGNORECASE) for line in lines for pattern in patterns) for name,patterns in REMOTE_TOOLS.items()}
     sip=contains_on(command('/usr/bin/csrutil','status'))
     gatekeeper=contains_on(command('/usr/sbin/spctl','--status'))
@@ -58,11 +72,11 @@ def live_status():
         'remote_login':remote_login, 'remote_apple_events':remote_apple,
         'screen_sharing_loaded':screen, 'ard_running':tools.get('Apple Remote Desktop',False),
         'sip_on':sip, 'gatekeeper_on':gatekeeper, 'filevault_on':filevault,
-        'firewall_on':firewall, 'tools':tools,
+        'firewall_on':firewall, 'tools':tools, 'applications':applications,
     }
 
 def monitoring_config():
-    values={'tcc':True,'unified_logs':True}
+    values={'tcc':True,'unified_logs':True,'data_movement':True}
     conf=BASE/'macaudit.conf'
     try:
         for raw in conf.read_text().splitlines():
@@ -71,6 +85,7 @@ def monitoring_config():
             k,v=(x.strip() for x in line.split('=',1))
             if k=='ENABLE_TCC_SCAN': values['tcc']=v=='1'
             elif k=='ENABLE_UNIFIED_LOG_SCAN': values['unified_logs']=v=='1'
+            elif k=='ENABLE_DATA_MOVEMENT_SCAN': values['data_movement']=v=='1'
     except OSError: pass
     return values
 
@@ -98,12 +113,18 @@ def parse_bound(value):
 def filter_events(events, qs):
     sev=qs.get('severity',[''])[0].upper()
     q=qs.get('q',[''])[0].lower()[:100]
+    presence=qs.get('presence',[''])[0].upper()
     date_from=parse_bound(qs.get('date_from',[''])[0])
     date_to=parse_bound(qs.get('date_to',[''])[0])
     out=[]
     for event in events:
         if sev and str(event.get('severity','')).upper()!=sev: continue
         if q and q not in json.dumps(event).lower(): continue
+        if presence:
+            ps=str(event.get('presence_state','')).upper()
+            if presence=='AWAY' and ps not in {'AWAY','LOCKED','LOGGED_OUT'}: continue
+            if presence=='ACTIVE' and ps!='ACTIVE': continue
+            if presence in {'LOCKED','LOGGED_OUT','UNKNOWN'} and ps!=presence: continue
         if date_from or date_to:
             timestamp=parse_event_time(event.get('timestamp'))
             if timestamp is None: continue
@@ -156,7 +177,7 @@ class Server(ThreadingHTTPServer):
     daemon_threads=True; request_queue_size=20
 
 class Handler(BaseHTTPRequestHandler):
-    server_version='MacAuditDashboard/3.3.3'; protocol_version='HTTP/1.1'
+    server_version='MacAuditDashboard/3.4.13'; protocol_version='HTTP/1.1'
     def log_message(self,*_): pass
     def common(self,ctype,length):
         self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(length)); self.send_header('Cache-Control','no-store')
