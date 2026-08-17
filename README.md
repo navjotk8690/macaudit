@@ -1,6 +1,6 @@
 # MacAudit
 
-> **Version 3.4.18**
+> **Version 3.4.19**
 
 MacAudit is a **local, read-only macOS auditing system** focused on remote access, SSH, privacy permissions, MDM, persistence, user accounts, security controls, installed software, and evidence timelines.
 
@@ -251,9 +251,11 @@ If a banner does not appear, check Notification settings for `osascript` or Scri
 ---
 
 
-# What's New in 3.4.18
+# What's New in 3.4.19
 
-3.4.18 is a polish and repository-safety release. Periodic Data Movement reconciliation now recognises recent live move/delete events for both a source path and its descendants, preventing a second vague `destination not determined` event after an already-resolved directory operation. Emptying a folder from Trash now reports the top-level Trash item rather than every child file inside it.
+3.4.19 is a narrow noise-reduction patch. It suppresses false folder-creation events caused by macOS AppKit's Open/Save panel probing the user's existing home, Desktop, Documents, Downloads, Pictures, Movies, and Music folders. Real Finder/user-created subfolders remain monitored.
+
+3.4.18 was a polish and repository-safety release. Periodic Data Movement reconciliation now recognises recent live move/delete events for both a source path and its descendants, preventing a second vague `destination not determined` event after an already-resolved directory operation. Emptying a folder from Trash now reports the top-level Trash item rather than every child file inside it.
 
 The Running applications panel now uses the more accurate `RUNNING` label and describes its scope as GUI plus selected security-relevant processes. No monitoring baselines are reset by this upgrade.
 

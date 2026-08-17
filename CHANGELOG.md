@@ -1,3 +1,10 @@
+# 3.4.19
+
+- Suppress false `Folder created` events when `com.apple.appkit.xpc.openAndSave` probes existing standard home folders with `mkdirat`.
+- The suppression is limited to the home root and Desktop, Documents, Downloads, Pictures, Movies, and Music.
+- Real Finder/user-created folders and subfolders remain monitored.
+- No changes to move/rename, project-to-project, Trash, software-download, remote/network, presence, or running-application collectors.
+
 # 3.4.18
 
 - Suppress reconciliation-only `destination not determined` duplicates when a recent live move/delete already resolved the source path or a descendant of that source.
