@@ -1,6 +1,6 @@
 # MacAudit
 
-> **Version 3.4.23**
+> **Version 3.5.3**
 
 MacAudit is a **local, read-only macOS auditing system** focused on remote access, SSH, privacy permissions, MDM, persistence, user accounts, security controls, installed software, and evidence timelines.
 
@@ -251,9 +251,9 @@ If a banner does not appear, check Notification settings for `osascript` or Scri
 ---
 
 
-# What's New in 3.4.23
+# What's New in 3.5.3
 
-3.4.23 reduces filesystem noise from shell-session housekeeping and bogus home-root mkdir probes, records the collector version on new events, and adds a compact local activity summary built from minute-level presence samples. The summary distinguishes active, away/idle, locked/logged-out and unobserved periods without synthesising input or changing macOS presence state.
+3.5.3 is a frontend-focused release built on the stable 3.4.23 monitoring baseline. It introduces a macOS-style sidebar, system light/dark appearance, a quieter overview, cleaner security and remote-access rows, compact event presentation, and redesigned Activity, Applications and Monitoring sections. Collector behaviour and data-movement correlation are unchanged.
 
 The always-visible Presence card has been removed because current awake/unlocked state adds little value while the user is at the Mac. MacAudit still records presence with events and keeps the **While I was away / locked**, **While I was active**, **Screen locked**, **Logged out**, and **Presence unknown** event filters.
 

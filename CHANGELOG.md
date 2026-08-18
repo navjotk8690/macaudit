@@ -1,3 +1,20 @@
+## 3.5.3
+
+- Reworked the dashboard hierarchy around daily activity and recorded events instead of duplicated overview cards.
+- Moved Daily Activity directly beneath live system identity/status and Events directly beneath Daily Activity.
+- Replaced the generic Mac Overview with dynamic local system information: Mac model, macOS/build, chip/architecture, uptime, collector version and last scan time.
+- Moved Security & Remote Access and Running Software below the activity/event runtime view.
+- Preserved the 10-second live event refresh and the stable 3.4.23 monitoring/data-movement engine.
+
+## 3.5.1
+
+- Redesigned the local dashboard around a macOS-style sidebar and content hierarchy.
+- Added automatic light/dark appearance using macOS system preferences.
+- Added compact Protection, Activity and Event overview summaries.
+- Simplified Security and Remote Access presentation with quieter semantic status rows.
+- Reworked Event History, Running Software and Monitoring Coverage for easier scanning.
+- Preserved the 3.4.23 collector, presence sampling, data-movement, Trash and software-download behaviour.
+
 ## 3.4.23
 
 - Ignore `~/.zsh_sessions/**` shell-session housekeeping in Data Movement.
@@ -306,3 +323,10 @@ All notable changes to MacAudit are documented here.
 
 ## [1.0.0]
 - Initial public release.
+
+## 3.5.1
+- Refined the dashboard into a warmer, neutral macOS-style visual system with restrained accent use.
+- Added explicit live refresh state, last successful refresh time, and a manual Refresh control.
+- Made event polling independent and observable so a summary-render problem cannot silently hide new event refreshes.
+- Added a cache-busting event request parameter and visible event-feed check time.
+- Collector and data-movement correlation logic remain unchanged from the 3.4.23 stable baseline.

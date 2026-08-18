@@ -3,83 +3,109 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>MacAudit Dashboard</title>
+  <meta name="color-scheme" content="light dark">
+  <title>MacAudit</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <main>
-    <header>
-      <div>
-        <div class="eyebrow">LOCAL SECURITY CONSOLE</div>
-        <h1>MacAudit</h1>
-        <p>Remote access, IP connections, screen permissions, files, software, startup items, accounts, and Mac security settings.</p>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="MacAudit navigation">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">M</div>
+        <div><strong>MacAudit</strong><small>Local audit trail</small></div>
       </div>
-      <div id="healthBadge" class="live"><span></span><b>Checking</b> · refreshes every 10s</div>
-    </header>
+      <nav>
+        <a class="nav-item active" href="#today"><span class="nav-icon">◷</span>Today</a>
+        <a class="nav-item" href="#events-section"><span class="nav-icon">△</span>Events</a>
+        <a class="nav-item" href="#security-section"><span class="nav-icon">⌁</span>Security</a>
+        <a class="nav-item" href="#software-section"><span class="nav-icon">▦</span>Software</a>
+        <a class="nav-item" href="#monitoring-section"><span class="nav-icon">◎</span>Monitoring</a>
+      </nav>
+      <div class="sidebar-footer">
+        <div id="healthBadge" class="health-badge"><span></span><b>Checking</b></div>
+        <small>Everything stays on this Mac</small>
+      </div>
+    </aside>
 
-    <div class="history-note"><b>Recorded event history</b><span>These counts are events recorded in the selected date range, not your current security status.</span></div>
-    <section class="cards" id="severityCards" aria-label="Filter event history by severity"></section>
-
-    <section class="panel day-summary-panel">
-      <div class="panel-title compact-title"><div><h2>Activity summary</h2><span id="activityPeriod">Presence sampling for the selected date range</span></div></div>
-      <div id="activitySummary" class="day-summary"></div>
-      <div id="activitySessions" class="activity-sessions"></div>
-    </section>
-
-    <section class="panel events-panel" id="eventTimeline">
-      <div class="panel-title event-head">
-        <div><h2>Event history</h2><span id="eventCount">0 events</span></div>
-        <div class="filters">
-          <select id="datePreset" aria-label="Filter by date">
-            <option value="today" selected>Today</option>
-            <option value="yesterday">Yesterday</option>
-            <option value="7days">Last 7 days</option>
-            <option value="30days">Last 30 days</option>
-            <option value="all">All retained history</option>
-            <option value="custom">Custom range</option>
-          </select>
-          <div id="customDates" class="custom-dates" hidden>
-            <input type="date" id="dateFrom" aria-label="Start date">
-            <span>to</span>
-            <input type="date" id="dateTo" aria-label="End date">
+    <main class="content">
+      <section id="today" class="page-section today-section">
+        <header class="page-header">
+          <div class="system-heading">
+            <div class="eyebrow">MACAUDIT</div>
+            <h1 id="systemName">This Mac</h1>
+            <p id="systemLine">Reading system information…</p>
           </div>
-          <select id="severity" aria-label="Filter by severity"><option value="">All severities</option><option>CRITICAL</option><option>HIGH</option><option>MEDIUM</option><option>LOW</option><option>INFO</option></select>
-          <select id="presence" aria-label="Filter by user presence"><option value="">All presence states</option><option value="AWAY">While I was away / locked</option><option value="ACTIVE">While I was active</option><option value="LOCKED">Screen locked</option><option value="LOGGED_OUT">Logged out</option><option value="UNKNOWN">Presence unknown</option></select>
-          <input id="search" placeholder="Search events…" aria-label="Search events">
+          <div class="header-actions">
+            <button id="refreshNow" class="refresh-button" type="button" title="Refresh dashboard now" aria-label="Refresh dashboard now">
+              <span class="refresh-glyph" aria-hidden="true">↻</span><span>Refresh</span>
+            </button>
+            <div id="refreshState" class="refresh-state" aria-live="polite"><span class="refresh-dot"></span><span>Starting…</span></div>
+          </div>
+        </header>
+
+        <div class="system-info-bar" id="systemInfo">
+          <div class="system-fact"><span>macOS</span><strong id="systemOS">—</strong></div>
+          <div class="system-fact"><span>Hardware</span><strong id="systemHardware">—</strong></div>
+          <div class="system-fact"><span>Uptime</span><strong id="systemUptime">—</strong></div>
+          <div class="system-fact"><span>Collector</span><strong id="collectorVersion">—</strong></div>
+          <div class="system-fact"><span>Last scan</span><strong id="lastScan">—</strong></div>
         </div>
-      </div>
-      <div id="activeFilter" class="active-filter" hidden></div>
-      <div id="events" class="events"></div>
-    </section>
 
-    <section class="grid overview-grid">
-      <article class="panel status-panel">
-        <div class="panel-title compact-title">
-          <div><h2>Mac security and remote access</h2><span id="lastScan">Waiting for data</span></div>
-          <span id="collectorVersion"></span>
+        <div class="section-page-title daily-title">
+          <div><div class="eyebrow">TODAY</div><h2>Daily activity</h2><p id="activityPeriod">Presence sampling for today</p></div>
         </div>
-        <div id="posture" class="posture"></div>
-      </article>
-      <article class="panel tools-panel">
-        <div class="panel-title compact-title"><div><h2>Remote tools</h2><span>running now</span></div></div>
-        <div id="tools" class="tools"></div>
-      </article>
-    </section>
+        <article class="mac-card activity-card">
+          <div id="activitySummary" class="day-summary"></div>
+          <div id="activitySessions" class="activity-sessions"></div>
+        </article>
+      </section>
 
-    <section class="grid activity-grid">
-      <article class="panel apps-panel">
-        <div class="panel-title compact-title"><div><h2>Running applications</h2><span>Grouped by role to make the list easier to review</span></div></div>
-        <div id="applications" class="app-groups"></div>
-      </article>
-    </section>
+      <section id="events-section" class="page-section events-section">
+        <div class="section-page-title event-title-row">
+          <div><div class="eyebrow">ACTIVITY LOG</div><h2>Events</h2><p id="eventCount">0 events</p></div>
+          <div class="filters">
+            <select id="datePreset" aria-label="Filter by date">
+              <option value="today" selected>Today</option><option value="yesterday">Yesterday</option><option value="7days">Last 7 days</option><option value="30days">Last 30 days</option><option value="all">All retained history</option><option value="custom">Custom range</option>
+            </select>
+            <div id="customDates" class="custom-dates" hidden><input type="date" id="dateFrom" aria-label="Start date"><span>to</span><input type="date" id="dateTo" aria-label="End date"></div>
+            <select id="severity" aria-label="Filter by severity"><option value="">All severities</option><option>CRITICAL</option><option>HIGH</option><option>MEDIUM</option><option>LOW</option><option>INFO</option></select>
+            <select id="presence" aria-label="Filter by user presence"><option value="">All presence states</option><option value="AWAY">While I was away / locked</option><option value="ACTIVE">While I was active</option><option value="LOCKED">Screen locked</option><option value="LOGGED_OUT">Logged out</option><option value="UNKNOWN">Presence unknown</option></select>
+            <input id="search" placeholder="Search events" aria-label="Search events">
+          </div>
+        </div>
+        <div class="history-note"><b>Recorded activity</b><span id="eventsRefreshNote">Checking for new events…</span></div>
+        <section class="cards" id="severityCards" aria-label="Filter event history by severity"></section>
+        <div id="activeFilter" class="active-filter" hidden></div>
+        <article class="mac-card events-card" id="eventTimeline"><div id="events" class="events"></div></article>
+      </section>
 
-    <section class="panel monitor-panel">
-      <div class="panel-title compact-title">
-        <div><h2>What MacAudit monitors</h2><span>Enabled checks and scan frequency</span></div>
-      </div>
-      <div id="monitoring" class="monitoring"></div>
-    </section>
-  </main>
+      <section id="security-section" class="page-section">
+        <div class="section-page-title"><div><div class="eyebrow">CURRENT STATE</div><h2>Security & remote access</h2><p>Settings and remote-capability software on this Mac right now</p></div></div>
+        <div class="security-grid">
+          <article class="mac-card">
+            <div class="section-heading"><div><h3>Security controls</h3><p>Protection and remote-access settings</p></div></div>
+            <div id="posture" class="posture"></div>
+          </article>
+          <article class="mac-card">
+            <div class="section-heading"><div><h3>Remote software</h3><p>Running services with remote-support capability</p></div><span class="subtle-label">Now</span></div>
+            <div id="tools" class="tools"></div>
+          </article>
+        </div>
+      </section>
+
+      <section id="software-section" class="page-section">
+        <div class="section-page-title"><div><div class="eyebrow">CURRENT STATE</div><h2>Running software</h2><p>Applications and services grouped by role</p></div></div>
+        <article class="mac-card apps-card"><div id="applications" class="app-groups"></div></article>
+      </section>
+
+      <section id="monitoring-section" class="page-section">
+        <div class="section-page-title"><div><div class="eyebrow">MACAUDIT</div><h2>Monitoring coverage</h2><p>What this installation is watching</p></div></div>
+        <article class="mac-card monitor-card"><div id="monitoring" class="monitoring"></div></article>
+      </section>
+
+      <footer class="footer-note">MacAudit is local and read-only. Security evidence remains on this Mac.</footer>
+    </main>
+  </div>
   <script src="/app.js"></script>
 </body>
 </html>

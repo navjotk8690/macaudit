@@ -3,7 +3,7 @@ set -u
 PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin
 umask 077
 
-VERSION="3.4.23"
+VERSION="3.5.3"
 BASE="/Library/Application Support/MacAudit"
 LOG_DIR="/Library/Logs/MacAudit"
 CONF="$BASE/macaudit.conf"
@@ -844,7 +844,7 @@ datawatch_baseline_trash_seen(){
 }
 
 datawatch_scan_trash_moves_once(){
-  local roots="$1" root trash destination dev ino source now evidence f seen current tmp key
+  local roots="$1" root trash destination dev ino source now evidence f seen current tmp key removed_key removed_path removed_tmp restored count_removed
   f="$(datawatch_trash_seen_state)"; seen="$(mktemp "$STATE/datawatch-trash-seen-read.tmp.XXXXXX")"
   [ -r "$f" ] && cp "$f" "$seen" 2>/dev/null || : > "$seen"
   current="$(mktemp "$STATE/datawatch-trash-current.tmp.XXXXXX")"; : > "$current"
@@ -875,6 +875,62 @@ datawatch_scan_trash_moves_once(){
       datawatch_track_identity "$destination" >/dev/null 2>&1 || true
     done < <(find "$trash" -mindepth 1 -maxdepth 1 -print 2>/dev/null)
   done <<< "$roots"
+
+  # Fallback for permanent Trash deletion/restoration. fs_usage is normally the
+  # authoritative source for unlink/rmdir/rename, but macOS can occasionally
+  # omit a short-lived filesystem call from the trace. The top-level Trash poll
+  # already tracks stable device/inode identities, so compare the previous and
+  # current sets and account for entries that disappeared.
+  #
+  # This deliberately runs after new-entry processing. A direct fs_usage delete
+  # recorded in the last few seconds wins and suppresses the polling fallback,
+  # preventing duplicate "Permanently deleted" cards. If the same inode is
+  # found elsewhere in the monitored tree, report it as moved/restored from
+  # Trash instead of claiming deletion.
+  count_removed=0
+  while IFS= read -r removed_key; do
+    [ -n "$removed_key" ] || continue
+    grep -Fqx "$removed_key" "$current" 2>/dev/null && continue
+    count_removed=$((count_removed+1))
+  done < "$seen"
+
+  while IFS= read -r removed_key; do
+    [ -n "$removed_key" ] || continue
+    grep -Fqx "$removed_key" "$current" 2>/dev/null && continue
+    dev="${removed_key%%$'\t'*}"; removed_tmp="${removed_key#*$'\t'}"
+    ino="${removed_tmp%%$'\t'*}"; removed_path="${removed_tmp#*$'\t'}"
+    [ -n "$removed_path" ] || continue
+
+    # The live syscall watcher may already have emitted the definitive delete.
+    if [ -r "$STATE/datawatch-recent.tsv" ] && awk -F '\t' -v cutoff="$((now-8))" -v p="$removed_path" '$1+0 >= cutoff && $2=="delete" && $3==p {found=1} END{exit(found?0:1)}' "$STATE/datawatch-recent.tsv" 2>/dev/null; then
+      continue
+    fi
+
+    restored=""
+    # For small numbers of disappearing entries, resolve the inode against the
+    # monitored tree so Finder "Put Back" or a move out of Trash is not called
+    # a deletion. Avoid N full-tree scans when Empty Trash removes many items.
+    if [ "$count_removed" -le 8 ]; then
+      restored="$(datawatch_find_path_for_identity "$dev" "$ino" "$removed_path" 2>/dev/null || true)"
+    fi
+    case "$restored" in
+      */.Trash|*/.Trash/*) restored="";;
+    esac
+
+    if [ -n "$restored" ] && [ "$restored" != "$removed_path" ]; then
+      printf -v evidence 'FROM: %s\nTO: %s\nPROCESS: Trash reconciliation\nCORRELATION: top-level Trash entry disappeared and the same filesystem device/inode was found at a new path' "$removed_path" "$restored"
+      emit INFO data-movement "Moved or restored from Trash: $removed_path -> $restored" "$evidence" "datawatch:trash-disappearance-move:$removed_path:$restored:$now" resolved
+      datawatch_record_recent move "$removed_path" "$restored"
+      datawatch_forget_path "$removed_path"
+      datawatch_track_identity "$restored" >/dev/null 2>&1 || true
+    else
+      printf -v evidence 'TRASH PATH: %s\nPROCESS: Trash reconciliation\nCORRELATION: a previously observed top-level Trash entry disappeared; no destination with the same filesystem identity was found. This is the fallback path used when the live unlink/rmdir trace is unavailable.' "$removed_path"
+      emit MEDIUM data-movement "Permanently deleted from Trash: $removed_path" "$evidence" "datawatch:trash-disappearance-delete:$removed_path:$now" resolved
+      datawatch_record_recent delete "$removed_path"
+      datawatch_forget_path "$removed_path"
+    fi
+  done < "$seen"
+
   sort -u "$current" > "$f" 2>/dev/null || true
   chmod 600 "$f" 2>/dev/null || true
   rm -f "$seen" "$current" 2>/dev/null || true

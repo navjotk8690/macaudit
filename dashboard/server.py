@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import hashlib, hmac, json, os, plistlib, re, secrets, subprocess, threading, time
+import hashlib, hmac, json, os, plistlib, platform, re, secrets, subprocess, threading, time
 from datetime import datetime, timedelta, timezone
 from collections import Counter, deque
 from http import cookies
@@ -180,7 +180,46 @@ def monitoring_config():
     return values
 
 CACHE_LOCK=threading.Lock(); CACHE={'at':0.0,'events':[],'health':{}}
+SYSTEM_INFO_CACHE={'at':0.0,'value':{}}
 
+
+
+def system_info():
+    now=time.monotonic()
+    cached_value=SYSTEM_INFO_CACHE.get('value') or {}
+    if cached_value and now-SYSTEM_INFO_CACHE.get('at',0)<3600:
+        info=dict(cached_value)
+    else:
+        model_name=''
+        model_identifier=command('/usr/sbin/sysctl','-n','hw.model')
+        chip=command('/usr/sbin/sysctl','-n','machdep.cpu.brand_string')
+        try:
+            raw=command('/usr/sbin/system_profiler','SPHardwareDataType','-json')
+            data=json.loads(raw) if raw else {}
+            hw=(data.get('SPHardwareDataType') or [{}])[0]
+            model_name=str(hw.get('machine_name') or hw.get('_name') or '')
+            model_identifier=str(hw.get('machine_model') or model_identifier or '')
+            chip=str(hw.get('chip_type') or hw.get('cpu_type') or chip or '')
+        except (ValueError, TypeError, IndexError):
+            pass
+        info={
+            'model_name':model_name or 'Mac',
+            'model_identifier':model_identifier or 'Unknown model',
+            'chip':chip or platform.machine(),
+            'architecture':platform.machine(),
+            'macos_version':command('/usr/bin/sw_vers','-productVersion') or platform.mac_ver()[0],
+            'macos_build':command('/usr/bin/sw_vers','-buildVersion'),
+        }
+        SYSTEM_INFO_CACHE.update(at=now,value=dict(info))
+    boot_raw=command('/usr/sbin/sysctl','-n','kern.boottime')
+    m=re.search(r'sec\s*=\s*(\d+)',boot_raw)
+    uptime_seconds=0
+    if m:
+        try: uptime_seconds=max(0,int(time.time())-int(m.group(1)))
+        except ValueError: pass
+    info['uptime_seconds']=uptime_seconds
+    info['console_user']=command('/usr/bin/stat','-f','%Su','/dev/console') or 'Unknown'
+    return info
 
 def parse_event_time(value):
     if not value:
@@ -323,7 +362,7 @@ class Server(ThreadingHTTPServer):
     daemon_threads=True; request_queue_size=20
 
 class Handler(BaseHTTPRequestHandler):
-    server_version='MacAuditDashboard/3.4.23'; protocol_version='HTTP/1.1'
+    server_version='MacAuditDashboard/3.5.2'; protocol_version='HTTP/1.1'
     def log_message(self,*_): pass
     def common(self,ctype,length):
         self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(length)); self.send_header('Cache-Control','no-store')
@@ -359,7 +398,7 @@ class Handler(BaseHTTPRequestHandler):
                     age=(datetime.now(timezone.utc)-datetime.fromisoformat(completed.replace('Z','+00:00'))).total_seconds()
                     if age>600: status='stale'
                 except Exception: status='unknown'
-            return self.json({'severity':severity,'total':len(filtered),'active_count':len(active),'health':health,'collector_status':status,'status':live_status(),'monitoring':monitoring_config(),'activity':activity_summary(qs)})
+            return self.json({'severity':severity,'total':len(filtered),'active_count':len(active),'health':health,'collector_status':status,'status':live_status(),'monitoring':monitoring_config(),'activity':activity_summary(qs),'system':system_info()})
         if parsed.path=='/api/health': return self.json({'ok':True})
         path='/index.html' if parsed.path=='/' else parsed.path; target=(WEB/path.lstrip('/')).resolve()
         if WEB.resolve() not in target.parents or not target.is_file(): self.send_error(404); return
