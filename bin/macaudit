@@ -1466,7 +1466,7 @@ $(cat "$work/inventory.meta" 2>/dev/null || true)"
   find "$STATE" -name 'data-seen-*' -mtime "+$RETENTION_DAYS" -delete 2>/dev/null || true
 }
 
-remote_processes(){ ps -axo pid=,user=,command= 2>/dev/null | awk 'BEGIN{IGNORECASE=1} /\/ARDAgent([ .\/]|$)|\/screensharingd([ .\/]|$)|jumpcloud-assist-(service|launcher)|TeamViewer|AnyDesk|Splashtop|RustDesk|ScreenConnect|ConnectWise|Bomgar|BeyondTrust|LogMeIn|RealVNC|TigerVNC/ {if($0 !~ /MacAudit|awk/) print}'; }
+remote_processes(){ ps -axo pid=,user=,command= 2>/dev/null | awk 'BEGIN{IGNORECASE=1} /\/ARDAgent([ .\/]|$)|\/screensharingd([ .\/]|$)|jumpcloud-assist-(service|launcher)|TeamViewer|AnyDesk|Splashtop|RustDesk|ScreenConnect|ConnectWise|Bomgar|BeyondTrust|LogMeIn|RealVNC|TigerVNC|\/Library\/PrivilegedHelperTools\/com\.nizlo\.agent\/Nizlo\.Agent\.Mac([[:space:]]|$)|\/Applications\/NizloRemote\.app\/Contents\/MacOS\/NizloRemote([[:space:]]|$)/ {if($0 !~ /MacAudit|awk/) print}'; }
 
 remote_tool_match(){
   local tool="$1" input="$2" pattern
@@ -1482,6 +1482,7 @@ remote_tool_match(){
     'BeyondTrust / Bomgar') pattern='BeyondTrust|Bomgar' ;;
     'LogMeIn') pattern='LogMeIn' ;;
     'VNC') pattern='RealVNC|TigerVNC|VNC Server' ;;
+    'Nizlo') pattern='/Library/PrivilegedHelperTools/com\.nizlo\.agent/Nizlo\.Agent\.Mac([[:space:]]|$)|/Applications/NizloRemote\.app/Contents/MacOS/NizloRemote([[:space:]]|$)' ;;
     *) return 0 ;;
   esac
   printf '%s\n' "$input" | grep -Ei "$pattern" || true
@@ -1522,7 +1523,7 @@ collect_fast(){
   rp="$(remote_processes)"
   # Track each remote-support product independently. One always-running tool
   # (for example JumpCloud Assist) must not hide TeamViewer starting/stopping.
-  for tool in 'Apple Remote Desktop' 'Screen Sharing' 'JumpCloud Assist' 'TeamViewer' 'AnyDesk' 'Splashtop' 'RustDesk' 'ScreenConnect / ConnectWise' 'BeyondTrust / Bomgar' 'LogMeIn' 'VNC'; do
+  for tool in 'Apple Remote Desktop' 'Screen Sharing' 'JumpCloud Assist' 'TeamViewer' 'AnyDesk' 'Splashtop' 'RustDesk' 'ScreenConnect / ConnectWise' 'BeyondTrust / Bomgar' 'LogMeIn' 'VNC' 'Nizlo'; do
     track_remote_tool "$tool" "$rp"
   done
 

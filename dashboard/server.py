@@ -21,7 +21,7 @@ SYSTEM_APP_NAMES = {
     'WiFiAgent','WindowManager'
 }
 SECURITY_REMOTE_NAMES = {
-    'EndpointAgentDaemon','ExpressVPN','JumpCloudApp','Microsoft Remote Desktop','RTProtectionDaemon','UTunnel'
+    'EndpointAgentDaemon','ExpressVPN','JumpCloudApp','Microsoft Remote Desktop','NizloRemote','RTProtectionDaemon','UTunnel'
 }
 BACKGROUND_NAMES = {
     'Adobe Desktop Service','AdobeIPCBroker','CCXProcess','Core Sync','Creative Cloud',
@@ -115,6 +115,10 @@ REMOTE_TOOLS = {
     "BeyondTrust / Bomgar": [r"BeyondTrust", r"Bomgar"],
     "LogMeIn": [r"LogMeIn"],
     "VNC": [r"RealVNC", r"TigerVNC", r"VNC Server"],
+    "Nizlo": [
+        r"/Library/PrivilegedHelperTools/com\.nizlo\.agent/Nizlo\.Agent\.Mac(?:\s|$)",
+        r"/Applications/NizloRemote\.app/Contents/MacOS/NizloRemote(?:\s|$)",
+    ],
 }
 
 def command(*args):

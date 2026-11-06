@@ -14,7 +14,7 @@ Unlike many security products, **MacAudit never uploads telemetry, never require
 
 - Remote Login (SSH) state and established SSH connections
 - Apple Screen Sharing and Apple Remote Desktop indicators
-- Common remote-support tools including TeamViewer, AnyDesk, Splashtop, RustDesk, ScreenConnect, BeyondTrust/Bomgar, LogMeIn and VNC-related processes
+- Common remote-support and RMM tools including TeamViewer, AnyDesk, Splashtop, RustDesk, ScreenConnect, BeyondTrust/Bomgar, LogMeIn, Nizlo and VNC-related processes
 - Strong remote-session indicators in macOS Unified Logs
 
 ## Privacy permissions
@@ -85,6 +85,8 @@ MacAudit records **evidence**. It does not guarantee detection of every commerci
 A Screen Recording permission means an application **is allowed** to capture the screen—not that it is actively recording.
 
 Likewise, a running remote-support service is evidence that remote access is possible, **not proof that somebody is connected**.
+
+Nizlo detection uses the vendor-published macOS agent and remote-client executable paths from the [Nizlo security-indicator dataset](https://izikipizi.github.io/nizlo-security-indicators/). Nizlo is legitimate RMM software; its presence alone is not evidence of compromise.
 
 TCC databases are protected by macOS. Even when running as root, macOS may return **Operation not permitted**. If this happens, keep the warning in the audit log and review permissions manually in **System Settings → Privacy & Security**. **Do not disable SIP** to make MacAudit work.
 

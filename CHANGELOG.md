@@ -1,3 +1,7 @@
+## Unreleased
+
+- Detect running Nizlo macOS agent and remote-support processes using the vendor-published executable paths. Nizlo is legitimate RMM software; a matching process is capability evidence, not proof of an active session or compromise.
+
 ## 3.5.3
 
 - Reworked the dashboard hierarchy around daily activity and recorded events instead of duplicated overview cards.
